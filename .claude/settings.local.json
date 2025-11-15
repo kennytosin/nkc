@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(sqlite3:*)",
+      "Bash(flutter analyze:*)",
+      "Bash(flutter pub get:*)",
+      "Bash(flutter build:*)",
+      "Bash(dart analyze:*)",
+      "Bash(cat:*)",
+      "Bash(\"/Users/mac/Documents/devotional_app-master 3/lib/main.dart\")"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}
