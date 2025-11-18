@@ -515,6 +515,10 @@ class _UserProfilePageState extends State<UserProfilePage>
   String? userName;
   String? profileImagePath;
   String? profileImageUrl;
+  String? userEmail;
+  DateTime? userBirthday;
+  String? userPhoneNumber;
+  DateTime? userCreatedAt;
   bool isLoading = true;
   bool isUploading = false;
 
@@ -552,16 +556,44 @@ class _UserProfilePageState extends State<UserProfilePage>
       return;
     }
 
-    // ✅ Get profile image (cloud or cached)
-    final imagePath = await UserProfileManager.getProfileImage(userId);
-    final imageUrl = await UserProfileManager.getProfileImageUrl(userId);
+    // ✅ Get user data from Supabase including new fields
+    try {
+      final userData = await Supabase.instance.client
+          .from('users')
+          .select(
+            'email, birthday, phone_number, created_at',
+          ) // ✅ Added created_at
+          .eq('id', userId)
+          .single();
 
-    setState(() {
-      userName = name;
-      profileImagePath = imagePath;
-      profileImageUrl = imageUrl;
-      isLoading = false;
-    });
+      final imagePath = await UserProfileManager.getProfileImage(userId);
+      final imageUrl = await UserProfileManager.getProfileImageUrl(userId);
+
+      setState(() {
+        userName = name;
+        userEmail = userData['email'] as String?;
+        userPhoneNumber = userData['phone_number'] as String?;
+
+        if (userData['birthday'] != null) {
+          userBirthday = DateTime.parse(userData['birthday'] as String);
+        }
+
+        // ✅ NEW: Parse created_at date
+        if (userData['created_at'] != null) {
+          userCreatedAt = DateTime.parse(userData['created_at'] as String);
+        }
+
+        profileImagePath = imagePath;
+        profileImageUrl = imageUrl;
+        isLoading = false;
+      });
+    } catch (e) {
+      print('❌ Error loading user data: $e');
+      setState(() {
+        userName = name;
+        isLoading = false;
+      });
+    }
   }
 
   Future<void> _pickImage() async {
@@ -782,7 +814,7 @@ class _UserProfilePageState extends State<UserProfilePage>
 
                 // User Name
                 Text(
-                  userName ?? 'User',
+                  userName ?? 'User'.toLowerCase(),
                   style: const TextStyle(
                     fontSize: 28,
                     fontWeight: FontWeight.bold,
@@ -852,10 +884,135 @@ class _UserProfilePageState extends State<UserProfilePage>
                         userName ?? 'N/A',
                       ),
                       const Divider(color: Colors.white24, height: 32),
+
+                      // ✅ UPDATED: Email with edit option
+                      GestureDetector(
+                        onTap: _editEmail,
+                        child: Row(
+                          children: [
+                            const Icon(
+                              Icons.email,
+                              color: Colors.amber,
+                              size: 20,
+                            ),
+                            const SizedBox(width: 12),
+                            const Text(
+                              'Email:',
+                              style: TextStyle(
+                                color: Colors.white70,
+                                fontSize: 14,
+                              ),
+                            ),
+                            const Spacer(),
+                            Flexible(
+                              child: Text(
+                                userEmail ?? 'Add email',
+                                style: const TextStyle(
+                                  color: Colors.white,
+                                  fontSize: 14,
+                                  fontWeight: FontWeight.w600,
+                                ),
+                                overflow: TextOverflow.ellipsis,
+                                textAlign: TextAlign.right,
+                              ),
+                            ),
+                            const SizedBox(width: 8),
+                            const Icon(
+                              Icons.edit,
+                              color: Colors.white54,
+                              size: 16,
+                            ),
+                          ],
+                        ),
+                      ),
+                      const Divider(color: Colors.white24, height: 32),
+
+                      // ✅ UPDATED: Birthday with edit option
+                      GestureDetector(
+                        onTap: _editBirthday,
+                        child: Row(
+                          children: [
+                            const Icon(
+                              Icons.cake,
+                              color: Colors.amber,
+                              size: 20,
+                            ),
+                            const SizedBox(width: 12),
+                            const Text(
+                              'Birthday:',
+                              style: TextStyle(
+                                color: Colors.white70,
+                                fontSize: 14,
+                              ),
+                            ),
+                            const Spacer(),
+                            Text(
+                              userBirthday != null
+                                  ? DateFormat(
+                                      'MMMM dd, yyyy',
+                                    ).format(userBirthday!)
+                                  : 'Not set',
+                              style: const TextStyle(
+                                color: Colors.white,
+                                fontSize: 14,
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
+                            const SizedBox(width: 8),
+                            const Icon(
+                              Icons.edit,
+                              color: Colors.white54,
+                              size: 16,
+                            ),
+                          ],
+                        ),
+                      ),
+                      const Divider(color: Colors.white24, height: 32),
+
+                      // ✅ NEW: Phone number with edit option
+                      GestureDetector(
+                        onTap: _editPhoneNumber,
+                        child: Row(
+                          children: [
+                            const Icon(
+                              Icons.phone,
+                              color: Colors.amber,
+                              size: 20,
+                            ),
+                            const SizedBox(width: 12),
+                            const Text(
+                              'Phone:',
+                              style: TextStyle(
+                                color: Colors.white70,
+                                fontSize: 14,
+                              ),
+                            ),
+                            const Spacer(),
+                            Text(
+                              userPhoneNumber ?? 'Add phone',
+                              style: const TextStyle(
+                                color: Colors.white,
+                                fontSize: 14,
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
+                            const SizedBox(width: 8),
+                            const Icon(
+                              Icons.edit,
+                              color: Colors.white54,
+                              size: 16,
+                            ),
+                          ],
+                        ),
+                      ),
+                      const Divider(color: Colors.white24, height: 32),
+
                       _buildInfoRow(
                         Icons.calendar_today,
                         'Member Since',
-                        DateTime.now().toString().substring(0, 10),
+                        userCreatedAt != null
+                            ? DateFormat('MMMM dd, yyyy').format(userCreatedAt!)
+                            : 'Unknown',
                       ),
                       if (profileImageUrl != null) ...[
                         const Divider(color: Colors.white24, height: 32),
@@ -913,6 +1070,297 @@ class _UserProfilePageState extends State<UserProfilePage>
         ],
       ),
     );
+  }
+
+  Future<void> _editPhoneNumber() async {
+    final TextEditingController controller = TextEditingController(
+      text: userPhoneNumber ?? '',
+    );
+
+    final newPhone = await showDialog<String>(
+      context: context,
+      builder: (context) => AlertDialog(
+        backgroundColor: const Color(0xFF1E1E1E),
+        title: const Text(
+          'Phone Number',
+          style: TextStyle(color: Colors.white),
+        ),
+        content: TextField(
+          controller: controller,
+          keyboardType: TextInputType.phone,
+          style: const TextStyle(color: Colors.white),
+          decoration: const InputDecoration(
+            hintText: 'Enter phone number (optional)',
+            hintStyle: TextStyle(color: Colors.white54),
+            prefixIcon: Icon(Icons.phone, color: Colors.white54),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Cancel', style: TextStyle(color: Colors.grey)),
+          ),
+          ElevatedButton(
+            onPressed: () => Navigator.pop(context, controller.text.trim()),
+            style: ElevatedButton.styleFrom(backgroundColor: Colors.blue),
+            child: const Text('Save', style: TextStyle(color: Colors.white)),
+          ),
+        ],
+      ),
+    );
+
+    if (newPhone != null) {
+      try {
+        final prefs = await SharedPreferences.getInstance();
+        final userId = prefs.getString('user_id');
+
+        if (userId != null) {
+          await Supabase.instance.client
+              .from('users')
+              .update({'phone_number': newPhone.isEmpty ? null : newPhone})
+              .eq('id', userId)
+              .select();
+
+          setState(() {
+            userPhoneNumber = newPhone.isEmpty ? null : newPhone;
+          });
+
+          if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(
+                content: Text('✅ Phone number updated'),
+                backgroundColor: Colors.green,
+              ),
+            );
+          }
+        }
+      } catch (e) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text('❌ Failed to update: $e'),
+              backgroundColor: Colors.red,
+            ),
+          );
+        }
+      }
+    }
+  }
+
+  Future<void> _editBirthday() async {
+    final DateTime? picked = await showDatePicker(
+      context: context,
+      initialDate:
+          userBirthday ??
+          DateTime.now().subtract(const Duration(days: 365 * 18)),
+      firstDate: DateTime(1900),
+      lastDate: DateTime.now(),
+      builder: (context, child) {
+        return Theme(
+          data: Theme.of(context).copyWith(
+            colorScheme: const ColorScheme.dark(
+              primary: Colors.amber,
+              onPrimary: Colors.black,
+              surface: Color(0xFF1E1E1E),
+              onSurface: Colors.white,
+            ),
+          ),
+          child: child!,
+        );
+      },
+    );
+
+    if (picked != null && picked != userBirthday) {
+      try {
+        final prefs = await SharedPreferences.getInstance();
+        final userId = prefs.getString('user_id');
+        final userName = prefs.getString('user_name');
+
+        if (userId != null) {
+          // Update in Supabase
+          await Supabase.instance.client
+              .from('users')
+              .update({'birthday': picked.toIso8601String()})
+              .eq('id', userId)
+              .select();
+
+          setState(() {
+            userBirthday = picked;
+          });
+
+          // ✅ Update birthday notification with new date
+          if (userName != null) {
+            try {
+              print('🎂 Updating birthday notification to new date...');
+              await NotificationService.setupBirthdayNotification(
+                userName: userName,
+                birthday: picked,
+              );
+              print('✅ Birthday notification updated successfully');
+            } catch (e) {
+              print('⚠️ Could not update birthday notification: $e');
+            }
+          }
+
+          if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(
+                content: Text('✅ Birthday updated successfully'),
+                backgroundColor: Colors.green,
+              ),
+            );
+          }
+        }
+      } catch (e) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text('❌ Failed to update birthday: $e'),
+              backgroundColor: Colors.red,
+            ),
+          );
+        }
+      }
+    }
+  }
+
+  Future<void> _editEmail() async {
+    final TextEditingController controller = TextEditingController(
+      text: userEmail ?? '',
+    );
+
+    final newEmail = await showDialog<String>(
+      context: context,
+      builder: (context) => AlertDialog(
+        backgroundColor: const Color(0xFF1E1E1E),
+        title: const Text(
+          'Email Address',
+          style: TextStyle(color: Colors.white),
+        ),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            TextField(
+              controller: controller,
+              keyboardType: TextInputType.emailAddress,
+              style: const TextStyle(color: Colors.white),
+              decoration: const InputDecoration(
+                hintText: 'Enter email address',
+                hintStyle: TextStyle(color: Colors.white54),
+                prefixIcon: Icon(Icons.email, color: Colors.white54),
+                enabledBorder: UnderlineInputBorder(
+                  borderSide: BorderSide(color: Colors.white24),
+                ),
+                focusedBorder: UnderlineInputBorder(
+                  borderSide: BorderSide(color: Colors.amber),
+                ),
+              ),
+            ),
+            const SizedBox(height: 8),
+            const Text(
+              'Make sure to enter a valid email address',
+              style: TextStyle(color: Colors.white54, fontSize: 12),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Cancel', style: TextStyle(color: Colors.grey)),
+          ),
+          ElevatedButton(
+            onPressed: () {
+              final email = controller.text.trim();
+
+              // Basic email validation
+              if (email.isEmpty) {
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(
+                    content: Text('❌ Email cannot be empty'),
+                    backgroundColor: Colors.red,
+                  ),
+                );
+                return;
+              }
+
+              if (!RegExp(
+                r'^[\w-\.]+@([\w-]+\.)+[\w-]{2,4}$',
+              ).hasMatch(email)) {
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(
+                    content: Text('❌ Please enter a valid email address'),
+                    backgroundColor: Colors.red,
+                  ),
+                );
+                return;
+              }
+
+              Navigator.pop(context, email);
+            },
+            style: ElevatedButton.styleFrom(backgroundColor: Colors.blue),
+            child: const Text('Save', style: TextStyle(color: Colors.white)),
+          ),
+        ],
+      ),
+    );
+
+    if (newEmail != null && newEmail != userEmail) {
+      try {
+        final prefs = await SharedPreferences.getInstance();
+        final userId = prefs.getString('user_id');
+
+        if (userId != null) {
+          // Check if email is already in use by another user
+          final existingUser = await Supabase.instance.client
+              .from('users')
+              .select('id')
+              .eq('email', newEmail.toLowerCase())
+              .limit(1)
+              .maybeSingle();
+
+          if (existingUser != null && existingUser['id'] != userId) {
+            if (mounted) {
+              ScaffoldMessenger.of(context).showSnackBar(
+                const SnackBar(
+                  content: Text('❌ This email is already in use'),
+                  backgroundColor: Colors.red,
+                ),
+              );
+            }
+            return;
+          }
+
+          // Update in Supabase
+          await Supabase.instance.client
+              .from('users')
+              .update({'email': newEmail.toLowerCase()})
+              .eq('id', userId)
+              .select();
+
+          setState(() {
+            userEmail = newEmail;
+          });
+
+          if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(
+                content: Text('✅ Email updated successfully'),
+                backgroundColor: Colors.green,
+              ),
+            );
+          }
+        }
+      } catch (e) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text('❌ Failed to update email: $e'),
+              backgroundColor: Colors.red,
+            ),
+          );
+        }
+      }
+    }
   }
 
   Widget _buildDefaultAvatar() {
@@ -1446,13 +1894,18 @@ Future<List<Devotional>> fetchDevotionals() async {
 }
 
 // ------------------------- AUTHENTICATION FUNCTIONS -------------------------
-Future<bool> registerUser({required String name, required String pin}) async {
+Future<bool> registerUser({
+  required String name,
+  required String pin,
+  required String email,
+  required DateTime birthday,
+}) async {
   try {
     // Check if user already exists (case-insensitive)
     final existingUser = await Supabase.instance.client
         .from('users')
         .select()
-        .eq('name', name.toLowerCase()) // ✅ Convert to lowercase
+        .eq('name', name.toLowerCase())
         .limit(1)
         .maybeSingle();
 
@@ -1460,10 +1913,24 @@ Future<bool> registerUser({required String name, required String pin}) async {
       throw Exception('User with this name already exists');
     }
 
-    // Insert new user with lowercase username
+    // Check if email already exists
+    final existingEmail = await Supabase.instance.client
+        .from('users')
+        .select()
+        .eq('email', email.toLowerCase())
+        .limit(1)
+        .maybeSingle();
+
+    if (existingEmail != null) {
+      throw Exception('Email address already in use');
+    }
+
+    // Insert new user with lowercase username and email
     await Supabase.instance.client.from('users').insert({
-      'name': name.toLowerCase(), // ✅ Store as lowercase
+      'name': name.toLowerCase(),
       'pin': pin,
+      'email': email.toLowerCase(),
+      'birthday': birthday.toIso8601String(),
       'created_at': DateTime.now().toIso8601String(),
     });
 
@@ -1479,11 +1946,11 @@ Future<Map<String, dynamic>?> loginUser({
   required String pin,
 }) async {
   try {
-    // ✅ Convert username to lowercase before querying
+    // ✅ Add birthday to the select query
     final response = await Supabase.instance.client
         .from('users')
-        .select('id, name, pin, created_at')
-        .eq('name', name.toLowerCase()) // ✅ Convert to lowercase
+        .select('id, name, pin, birthday, created_at') // ✅ Added birthday
+        .eq('name', name.toLowerCase())
         .eq('pin', pin)
         .limit(1)
         .maybeSingle();
@@ -1512,6 +1979,8 @@ class _AuthPageState extends State<AuthPage>
 
   final _nameController = TextEditingController();
   final _pinController = TextEditingController();
+  final _emailController = TextEditingController(); // ✅ NEW
+  DateTime? _selectedBirthday; // ✅ NEW
 
   bool _isPinVisible = false;
   bool _isLoading = false;
@@ -1570,15 +2039,50 @@ class _AuthPageState extends State<AuthPage>
     _animationController.dispose();
     _nameController.dispose();
     _pinController.dispose();
+    _emailController.dispose(); // ✅ NEW
     super.dispose();
   }
 
   void _toggleAuthMode() {
     setState(() {
       isLogin = !isLogin;
+      // Clear fields when switching modes
+      if (isLogin) {
+        _emailController.clear();
+        _selectedBirthday = null;
+      }
     });
     _animationController.reset();
     _animationController.forward();
+  }
+
+  // ✅ NEW: Date picker for birthday
+  Future<void> _pickBirthday() async {
+    final DateTime? picked = await showDatePicker(
+      context: context,
+      initialDate: DateTime.now().subtract(const Duration(days: 365 * 18)),
+      firstDate: DateTime(1900),
+      lastDate: DateTime.now(),
+      builder: (context, child) {
+        return Theme(
+          data: Theme.of(context).copyWith(
+            colorScheme: const ColorScheme.dark(
+              primary: Colors.amber,
+              onPrimary: Colors.black,
+              surface: Color(0xFF1E1E1E),
+              onSurface: Colors.white,
+            ),
+          ),
+          child: child!,
+        );
+      },
+    );
+
+    if (picked != null) {
+      setState(() {
+        _selectedBirthday = picked;
+      });
+    }
   }
 
   Future<void> _handleAuth() async {
@@ -1591,6 +2095,7 @@ class _AuthPageState extends State<AuthPage>
 
     final name = _nameController.text.trim();
     final pin = _pinController.text.trim();
+    final email = _emailController.text.trim();
 
     if (name.isEmpty || pin.isEmpty) {
       _showErrorSnackBar('Please enter both name and PIN');
@@ -1600,6 +2105,25 @@ class _AuthPageState extends State<AuthPage>
     if (pin.length < 4) {
       _showErrorSnackBar('PIN must be at least 4 digits');
       return;
+    }
+
+    // ✅ NEW: Validate signup fields
+    if (!isLogin) {
+      if (email.isEmpty) {
+        _showErrorSnackBar('Please enter your email address');
+        return;
+      }
+
+      // Basic email validation
+      if (!RegExp(r'^[\w-\.]+@([\w-]+\.)+[\w-]{2,4}$').hasMatch(email)) {
+        _showErrorSnackBar('Please enter a valid email address');
+        return;
+      }
+
+      if (_selectedBirthday == null) {
+        _showErrorSnackBar('Please select your birthday');
+        return;
+      }
     }
 
     setState(() => _isLoading = true);
@@ -1616,8 +2140,6 @@ class _AuthPageState extends State<AuthPage>
           final userId = user['id'] as String;
           await prefs.setString('user_id', userId);
 
-          // ✅ FIXED: Initialize notifications BEFORE syncing settings
-          // This ensures the notification service is ready to schedule notifications
           try {
             await NotificationService.initialize();
             print('🔔 Notification service initialized for new login');
@@ -1625,7 +2147,21 @@ class _AuthPageState extends State<AuthPage>
             print('⚠️ Could not initialize notifications: $e');
           }
 
-          // ✅ Sync data from cloud after login
+          // ✅ NEW: Setup birthday notification immediately after login
+          if (user['birthday'] != null) {
+            try {
+              final birthday = DateTime.parse(user['birthday'] as String);
+              print('🎂 Setting up birthday notification for $name');
+              await NotificationService.setupBirthdayNotification(
+                userName: name,
+                birthday: birthday,
+              );
+              print('✅ Birthday notification setup complete');
+            } catch (e) {
+              print('❌ Failed to setup birthday notification: $e');
+            }
+          }
+
           try {
             await CloudSyncManager.instance.syncAll(userId);
             print('✅ All data synced from cloud after login');
@@ -1644,7 +2180,13 @@ class _AuthPageState extends State<AuthPage>
           _showErrorSnackBar('Invalid name or PIN');
         }
       } else {
-        await registerUser(name: name, pin: pin);
+        // ✅ Register with new fields
+        await registerUser(
+          name: name,
+          pin: pin,
+          email: email,
+          birthday: _selectedBirthday!,
+        );
 
         final user = await loginUser(name: name, pin: pin);
 
@@ -1655,6 +2197,20 @@ class _AuthPageState extends State<AuthPage>
         if (user != null) {
           final userId = user['id'] as String;
           await prefs.setString('user_id', userId);
+
+          // ✅ NEW: Setup birthday notification for new user
+          if (_selectedBirthday != null) {
+            try {
+              print('🎂 Setting up birthday notification for new user $name');
+              await NotificationService.setupBirthdayNotification(
+                userName: name,
+                birthday: _selectedBirthday!,
+              );
+              print('✅ Birthday notification setup complete');
+            } catch (e) {
+              print('❌ Failed to setup birthday notification: $e');
+            }
+          }
         }
 
         if (mounted) {
@@ -1733,22 +2289,18 @@ class _AuthPageState extends State<AuthPage>
   Widget _buildAppHeader() {
     return Column(
       children: [
-        // App Icon - Just the image, no background or shadow
         SizedBox(
           width: 100,
           height: 100,
           child: Image.asset(
             'assets/images/iiii.png',
-            fit: BoxFit.contain, // or BoxFit.cover depending on your preference
+            fit: BoxFit.contain,
             errorBuilder: (context, error, stackTrace) {
-              // Fallback icon if image fails to load
               return const Icon(Icons.menu_book, size: 80, color: Colors.amber);
             },
           ),
         ),
         const SizedBox(height: 24),
-
-        // App Title
         const Text(
           'NKC DEVOTIONAL',
           style: TextStyle(
@@ -1759,8 +2311,6 @@ class _AuthPageState extends State<AuthPage>
           ),
         ),
         const SizedBox(height: 8),
-
-        // Subtitle
         const Text(
           'Your Daily Spiritual Companion',
           style: TextStyle(
@@ -1828,7 +2378,6 @@ class _AuthPageState extends State<AuthPage>
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          // Tab Header
           Text(
             isLogin ? 'Welcome Back' : 'Create Account',
             style: const TextStyle(
@@ -1857,6 +2406,21 @@ class _AuthPageState extends State<AuthPage>
 
           const SizedBox(height: 20),
 
+          // ✅ NEW: Email Field (only for signup)
+          if (!isLogin) ...[
+            _buildTextField(
+              controller: _emailController,
+              label: 'Email Address',
+              hint: 'Enter your email',
+              icon: Icons.email_outlined,
+              keyboardType: TextInputType.emailAddress,
+            ),
+            const SizedBox(height: 20),
+          ],
+
+          // ✅ NEW: Birthday Field (only for signup)
+          if (!isLogin) ...[_buildBirthdayField(), const SizedBox(height: 20)],
+
           // PIN Field
           _buildTextField(
             controller: _pinController,
@@ -1876,7 +2440,6 @@ class _AuthPageState extends State<AuthPage>
 
           const SizedBox(height: 32),
 
-          // Auth Button
           _buildAuthButton(
             onPressed: _handleAuth,
             label: isLogin ? 'Login' : 'Sign Up',
@@ -1884,7 +2447,6 @@ class _AuthPageState extends State<AuthPage>
 
           const SizedBox(height: 24),
 
-          // Toggle Auth Mode
           Row(
             mainAxisAlignment: MainAxisAlignment.center,
             children: [
@@ -1914,6 +2476,65 @@ class _AuthPageState extends State<AuthPage>
           ),
         ],
       ),
+    );
+  }
+
+  // ✅ NEW: Birthday field widget
+  Widget _buildBirthdayField() {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const Padding(
+          padding: EdgeInsets.only(left: 4, bottom: 8),
+          child: Text(
+            'Birthday',
+            style: TextStyle(
+              color: Colors.white,
+              fontSize: 14,
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+        ),
+        GestureDetector(
+          onTap: _pickBirthday,
+          child: Container(
+            decoration: BoxDecoration(
+              color: const Color(0xFF1E1E1E),
+              borderRadius: BorderRadius.circular(12),
+              border: Border.all(color: Colors.white12, width: 1),
+            ),
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 16),
+            child: Row(
+              children: [
+                const Icon(
+                  Icons.cake_outlined,
+                  color: Colors.white54,
+                  size: 22,
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Text(
+                    _selectedBirthday != null
+                        ? DateFormat('MMMM dd, yyyy').format(_selectedBirthday!)
+                        : 'Select your birthday',
+                    style: TextStyle(
+                      color: _selectedBirthday != null
+                          ? Colors.white
+                          : Colors.white38,
+                      fontSize: 16,
+                    ),
+                  ),
+                ),
+                const Icon(
+                  Icons.calendar_today,
+                  color: Colors.white54,
+                  size: 20,
+                ),
+              ],
+            ),
+          ),
+        ),
+      ],
     );
   }
 
@@ -2056,6 +2677,21 @@ class NotificationService {
 
   /// Initialize notifications with proper timezone handling
   static Future<void> initialize() async {
+    // ✅ Request notification permission for Android 13+
+    try {
+      if (await Permission.notification.isDenied) {
+        final status = await Permission.notification.request();
+        print('📱 Notification permission status: $status');
+        if (status.isPermanentlyDenied) {
+          print(
+            '⚠️ Notification permission permanently denied. Please enable in settings.',
+          );
+        }
+      }
+    } catch (e) {
+      print('⚠️ Could not request notification permission: $e');
+    }
+
     // ✅ Initialize timezone database
     tz.initializeTimeZones();
 
@@ -2160,6 +2796,7 @@ class NotificationService {
 
   /// Create notification channel for Android
   static Future<void> _createNotificationChannel() async {
+    // Create daily devotional channel
     const AndroidNotificationChannel channel = AndroidNotificationChannel(
       _notificationChannelId,
       _notificationChannelName,
@@ -2169,11 +2806,27 @@ class NotificationService {
       enableVibration: true,
     );
 
-    await _notifications
+    final androidPlugin = _notifications
         .resolvePlatformSpecificImplementation<
           AndroidFlutterLocalNotificationsPlugin
-        >()
-        ?.createNotificationChannel(channel);
+        >();
+
+    await androidPlugin?.createNotificationChannel(channel);
+
+    // Create birthday notification channel
+    const AndroidNotificationChannel birthdayChannel =
+        AndroidNotificationChannel(
+          'birthday_channel',
+          'Birthday Wishes',
+          description: 'Birthday celebration notifications',
+          importance: Importance.max,
+          playSound: true,
+          enableVibration: true,
+          enableLights: true,
+        );
+
+    await androidPlugin?.createNotificationChannel(birthdayChannel);
+    print('✅ Notification channels created (Daily + Birthday)');
   }
 
   /// Handle notification tap
@@ -2382,15 +3035,58 @@ class NotificationService {
   /// Load and apply saved notification settings
   static Future<void> loadAndApplySettings() async {
     try {
-      final isEnabled = await isNotificationsEnabled();
+      final isEnabled = await NotificationService.isNotificationsEnabled();
 
       if (isEnabled) {
-        final time = await getNotificationTime();
+        final time = await NotificationService.getNotificationTime();
         await _scheduleDailyNotification(time.hour, time.minute);
 
         print('📱 Restored daily notifications');
         print('   Time: ${_formatTime(time.hour, time.minute)}');
         print('   Timezone: ${DateTime.now().timeZoneName}');
+      }
+
+      // ✅ IMPROVED: Auto-schedule birthday notification on app start with better logging
+      print('🎂 Checking for birthday notification setup...');
+      try {
+        final prefs = await SharedPreferences.getInstance();
+        final userId = prefs.getString('user_id');
+        final userName = prefs.getString('user_name');
+
+        print('   User ID: ${userId ?? "null"}');
+        print('   User Name: ${userName ?? "null"}');
+
+        if (userId != null && userName != null) {
+          print('   Fetching birthday from database...');
+
+          final userData = await Supabase.instance.client
+              .from('users')
+              .select('birthday')
+              .eq('id', userId)
+              .single();
+
+          print('   Database response: $userData');
+
+          if (userData['birthday'] != null) {
+            final birthday = DateTime.parse(userData['birthday'] as String);
+            print(
+              '   ✅ Birthday found: ${DateFormat('MMMM dd, yyyy').format(birthday)}',
+            );
+
+            await setupBirthdayNotification(
+              userName: userName,
+              birthday: birthday,
+            );
+
+            print('   ✅ Birthday notification setup completed');
+          } else {
+            print('   ⚠️ No birthday set in database');
+          }
+        } else {
+          print('   ⚠️ User not logged in or user data missing');
+        }
+      } catch (e) {
+        print('   ❌ Error setting up birthday notification: $e');
       }
     } catch (e) {
       print('❌ Failed to load notification settings: $e');
@@ -2448,6 +3144,294 @@ class NotificationService {
     }
 
     print('===========================');
+  }
+
+  // ✅ BIRTHDAY NOTIFICATION METHODS
+
+  /// Setup birthday notification
+  static Future<void> setupBirthdayNotification({
+    required String userName,
+    required DateTime birthday,
+  }) async {
+    try {
+      print('🎂 === BIRTHDAY NOTIFICATION SETUP ===');
+      print('   User: $userName');
+      print('   Birthday: ${DateFormat('MMMM dd, yyyy').format(birthday)}');
+
+      final now = tz.TZDateTime.now(tz.local);
+      print('   Current date: ${DateFormat('MMMM dd, yyyy').format(now)}');
+      print('   Current time: ${DateFormat('HH:mm:ss').format(now)}');
+
+      // Check if TODAY is their birthday
+      final isBirthdayToday =
+          now.month == birthday.month && now.day == birthday.day;
+
+      print('   Is birthday today? $isBirthdayToday');
+      print('   Today: Month ${now.month}, Day ${now.day}');
+      print('   Birthday: Month ${birthday.month}, Day ${birthday.day}');
+
+      if (isBirthdayToday) {
+        print('   🎉 TODAY IS THE BIRTHDAY!');
+        final age = now.year - birthday.year;
+        print('   Age: $age');
+
+        await sendImmediateBirthdayNotification(userName, age);
+        print('   ✅ Immediate notification sent');
+
+        await _scheduleNextYearBirthday(userName, birthday);
+        print('   ✅ Next year notification scheduled');
+      } else {
+        print('   📅 Birthday is not today, scheduling for next occurrence');
+        await _scheduleNextBirthday(userName, birthday);
+        print('   ✅ Next birthday notification scheduled');
+      }
+
+      print('🎂 === BIRTHDAY SETUP COMPLETE ===');
+    } catch (e) {
+      print('❌ Error in setupBirthdayNotification: $e');
+    }
+  }
+
+  /// Schedule next birthday notification
+  static Future<void> _scheduleNextBirthday(
+    String userName,
+    DateTime birthday,
+  ) async {
+    try {
+      print('📅 === SCHEDULING NEXT BIRTHDAY ===');
+
+      final now = tz.TZDateTime.now(tz.local);
+      print('   Current date: ${DateFormat('yyyy-MM-dd').format(now)}');
+
+      DateTime nextBirthday = DateTime(now.year, birthday.month, birthday.day);
+
+      print(
+        '   Initial next birthday: ${DateFormat('yyyy-MM-dd').format(nextBirthday)}',
+      );
+
+      if (nextBirthday.isBefore(DateTime.now())) {
+        nextBirthday = DateTime(now.year + 1, birthday.month, birthday.day);
+        print('   Birthday passed this year, moving to next year');
+      }
+
+      print(
+        '   Final next birthday: ${DateFormat('yyyy-MM-dd').format(nextBirthday)}',
+      );
+
+      final age = nextBirthday.year - birthday.year;
+      print('   Age on next birthday: $age');
+
+      final scheduledDate = tz.TZDateTime(
+        tz.local,
+        nextBirthday.year,
+        nextBirthday.month,
+        nextBirthday.day,
+        0,
+        0,
+      );
+
+      print('   Scheduled TZ date: $scheduledDate');
+      print(
+        '   Days until birthday: ${nextBirthday.difference(DateTime.now()).inDays}',
+      );
+
+      // Load birthday image
+      final ByteData bytes = await rootBundle.load(
+        'assets/images/birthday_cake.png',
+      );
+      final Uint8List byteList = bytes.buffer.asUint8List();
+      print('   ✅ Birthday image loaded (${byteList.length} bytes)');
+
+      final BigPictureStyleInformation
+      bigPictureStyle = BigPictureStyleInformation(
+        ByteArrayAndroidBitmap(byteList),
+        largeIcon: const DrawableResourceAndroidBitmap('@mipmap/ic_launcher'),
+        contentTitle: '🎉 Happy Birthday, $userName!',
+        summaryText:
+            'Wishing you a blessed day filled with God\'s grace and love. May this year bring you closer to Him! 🙏✨',
+        htmlFormatContentTitle: true,
+        htmlFormatSummaryText: true,
+      );
+
+      final AndroidNotificationDetails androidDetails =
+          AndroidNotificationDetails(
+            'birthday_channel',
+            'Birthday Wishes',
+            channelDescription: 'Birthday celebration notifications',
+            importance: Importance.max,
+            priority: Priority.max,
+            playSound: true,
+            enableVibration: true,
+            enableLights: true,
+            color: const Color(0xFFFFC107),
+            icon: '@mipmap/ic_launcher',
+            styleInformation: bigPictureStyle,
+          );
+
+      final NotificationDetails notificationDetails = NotificationDetails(
+        android: androidDetails,
+      );
+
+      await _notifications.zonedSchedule(
+        2000, // Birthday notification ID
+        '🎉 Happy Birthday, $userName!',
+        'Wishing you a blessed day filled with God\'s grace and love. May this year bring you closer to Him! 🙏✨',
+        scheduledDate,
+        notificationDetails,
+        androidScheduleMode: AndroidScheduleMode.exactAllowWhileIdle,
+        matchDateTimeComponents: DateTimeComponents.dayOfMonthAndTime,
+        payload: 'birthday_wish',
+      );
+
+      print('   ✅ Birthday notification scheduled successfully');
+      print('   Notification ID: 2000');
+      print('📅 === SCHEDULING COMPLETE ===');
+    } catch (e) {
+      print('❌ Error scheduling birthday: $e');
+    }
+  }
+
+  /// Send immediate birthday notification
+  static Future<void> sendImmediateBirthdayNotification(
+    String userName,
+    int age,
+  ) async {
+    try {
+      print('🎉 === SENDING IMMEDIATE BIRTHDAY NOTIFICATION ===');
+      print('   User: $userName');
+      print('   Age: $age');
+
+      // Load custom birthday image
+      final ByteData bytes = await rootBundle.load(
+        'assets/images/birthday_cake.png',
+      );
+      final Uint8List byteList = bytes.buffer.asUint8List();
+      print('   ✅ Image loaded (${byteList.length} bytes)');
+
+      final BigPictureStyleInformation
+      bigPictureStyle = BigPictureStyleInformation(
+        ByteArrayAndroidBitmap(byteList),
+        largeIcon: const DrawableResourceAndroidBitmap('@mipmap/ic_launcher'),
+        contentTitle: '🎉 Happy Birthday, $userName!',
+        summaryText:
+            'Wishing you a blessed day filled with God\'s grace and love. May this year bring you closer to Him! 🙏✨',
+        htmlFormatContentTitle: true,
+        htmlFormatSummaryText: true,
+      );
+
+      final AndroidNotificationDetails androidDetails =
+          AndroidNotificationDetails(
+            'birthday_channel',
+            'Birthday Wishes',
+            channelDescription: 'Birthday celebration notifications',
+            importance: Importance.max,
+            priority: Priority.max,
+            playSound: true,
+            enableVibration: true,
+            enableLights: true,
+            color: const Color(0xFFFFC107),
+            icon: '@mipmap/ic_launcher',
+            styleInformation: bigPictureStyle,
+          );
+
+      final NotificationDetails notificationDetails = NotificationDetails(
+        android: androidDetails,
+      );
+
+      await _notifications.show(
+        2001, // Immediate birthday notification ID
+        '🎉 Happy Birthday, $userName!',
+        'Wishing you a blessed day filled with God\'s grace and love. May this year bring you closer to Him! 🙏✨',
+        notificationDetails,
+        payload: 'birthday_wish_immediate',
+      );
+
+      print('   ✅ Immediate notification sent successfully');
+      print('   Notification ID: 2001');
+      print('🎉 === IMMEDIATE NOTIFICATION COMPLETE ===');
+    } catch (e) {
+      print('❌ Error sending immediate birthday notification: $e');
+    }
+  }
+
+  /// Schedule next year birthday notification
+  static Future<void> _scheduleNextYearBirthday(
+    String userName,
+    DateTime birthday,
+  ) async {
+    try {
+      print('📅 === SCHEDULING NEXT YEAR BIRTHDAY ===');
+
+      final now = tz.TZDateTime.now(tz.local);
+      final nextYear = now.year + 1;
+      final age = nextYear - birthday.year;
+
+      print('   Next year: $nextYear');
+      print('   Age next year: $age');
+
+      final scheduledDate = tz.TZDateTime(
+        tz.local,
+        nextYear,
+        birthday.month,
+        birthday.day,
+        0,
+        0,
+      );
+
+      print('   Scheduled for: $scheduledDate');
+
+      // Load custom birthday image
+      final ByteData bytes = await rootBundle.load(
+        'assets/images/birthday_cake.png',
+      );
+      final Uint8List byteList = bytes.buffer.asUint8List();
+
+      final BigPictureStyleInformation
+      bigPictureStyle = BigPictureStyleInformation(
+        ByteArrayAndroidBitmap(byteList),
+        largeIcon: const DrawableResourceAndroidBitmap('@mipmap/ic_launcher'),
+        contentTitle: '🎉 Happy Birthday, $userName!',
+        summaryText:
+            'Wishing you a blessed day filled with God\'s grace and love. May this year bring you closer to Him! 🙏✨',
+        htmlFormatContentTitle: true,
+        htmlFormatSummaryText: true,
+      );
+
+      final AndroidNotificationDetails androidDetails =
+          AndroidNotificationDetails(
+            'birthday_channel',
+            'Birthday Wishes',
+            channelDescription: 'Birthday celebration notifications',
+            importance: Importance.max,
+            priority: Priority.max,
+            playSound: true,
+            enableVibration: true,
+            enableLights: true,
+            color: const Color(0xFFFFC107),
+            icon: '@mipmap/ic_launcher',
+            styleInformation: bigPictureStyle,
+          );
+
+      final NotificationDetails notificationDetails = NotificationDetails(
+        android: androidDetails,
+      );
+
+      await _notifications.zonedSchedule(
+        2000,
+        '🎉 Happy Birthday, $userName!',
+        'Wishing you a blessed day filled with God\'s grace and love. May this year bring you closer to Him! 🙏✨',
+        scheduledDate,
+        notificationDetails,
+        androidScheduleMode: AndroidScheduleMode.exactAllowWhileIdle,
+        matchDateTimeComponents: DateTimeComponents.dayOfMonthAndTime,
+        payload: 'birthday_wish',
+      );
+
+      print('   ✅ Next year birthday scheduled successfully');
+      print('📅 === NEXT YEAR SCHEDULING COMPLETE ===');
+    } catch (e) {
+      print('❌ Error scheduling next year birthday: $e');
+    }
   }
 }
 
@@ -5452,7 +6436,6 @@ class _DevotionalHomePageState extends State<DevotionalHomePage>
     )..repeat(reverse: true);
   }
 
-  // mark point
   Future<void> _loadUserData() async {
     final name = await getLoggedInUserName();
 

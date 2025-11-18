@@ -55,6 +55,7 @@ flutter:
     - shorebird.yaml
     - assets/images/iiii.png # For login page
     - assets/images/iiii - Copy.png # For launcher icon (optional if using same image)
+    - assets/images/birthday_cake.png #For birthday
 
 # Launcher icon configuration
 flutter_launcher_icons:
