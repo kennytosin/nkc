@@ -1,6 +1,9 @@
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:intl/intl.dart';
+import 'package:http/http.dart' as http;
+import 'dart:convert';
+import 'paystack_service.dart';
 
 // ------------------------- SUBSCRIPTION MODELS -------------------------
 
@@ -46,7 +49,7 @@ class SubscriptionPlan {
     SubscriptionPlan(
       tier: SubscriptionTier.threeMonths,
       name: '3-Month Premium',
-      price: 1.50,
+      price: 5000.00, // ₦5,000 NGN
       durationMonths: 3,
       features: [
         '✅ Access to ALL devotionals',
@@ -61,7 +64,7 @@ class SubscriptionPlan {
     SubscriptionPlan(
       tier: SubscriptionTier.sixMonths,
       name: '6-Month Premium',
-      price: 2.00,
+      price: 8000.00, // ₦8,000 NGN - Best value!
       durationMonths: 6,
       features: [
         '✅ Access to ALL devotionals',
@@ -77,7 +80,7 @@ class SubscriptionPlan {
     SubscriptionPlan(
       tier: SubscriptionTier.yearly,
       name: 'Yearly Premium',
-      price: 3.00,
+      price: 12000.00, // ₦12,000 NGN - Maximum savings
       durationMonths: 12,
       features: [
         '✅ Access to ALL devotionals',
@@ -94,7 +97,9 @@ class SubscriptionPlan {
   ];
 
   String get priceDisplay {
-    return price == 0 ? 'Free' : '\$${price.toStringAsFixed(2)}';
+    if (price == 0) return 'Free';
+    // Format for NGN currency
+    return '₦${price.toStringAsFixed(0)}';
   }
 
   String get durationDisplay {
@@ -113,18 +118,41 @@ class SubscriptionPlan {
 // ------------------------- SUBSCRIPTION MANAGER -------------------------
 
 class SubscriptionManager {
-  static const String _tierKey = 'subscription_tier';
-  static const String _expiryKey = 'subscription_expiry';
-  static const String _purchaseDateKey = 'subscription_purchase_date';
+  static const String _tierKeySuffix = '_subscription_tier';
+  static const String _expiryKeySuffix = '_subscription_expiry';
+  static const String _purchaseDateKeySuffix = '_subscription_purchase_date';
+
+  // Get user-specific keys
+  static Future<String> _getUserId() async {
+    final prefs = await SharedPreferences.getInstance();
+    return prefs.getString('user_id') ?? 'default_user';
+  }
+
+  static Future<String> _getTierKey() async {
+    final userId = await _getUserId();
+    return '${userId}$_tierKeySuffix';
+  }
+
+  static Future<String> _getExpiryKey() async {
+    final userId = await _getUserId();
+    return '${userId}$_expiryKeySuffix';
+  }
+
+  static Future<String> _getPurchaseDateKey() async {
+    final userId = await _getUserId();
+    return '${userId}$_purchaseDateKeySuffix';
+  }
 
   // Check if user has premium access
   static Future<bool> hasPremiumAccess() async {
     final prefs = await SharedPreferences.getInstance();
-    final tierIndex = prefs.getInt(_tierKey) ?? 0;
+    final tierKey = await _getTierKey();
+    final tierIndex = prefs.getInt(tierKey) ?? 0;
 
     if (tierIndex == 0) return false; // Free tier
 
-    final expiryString = prefs.getString(_expiryKey);
+    final expiryKey = await _getExpiryKey();
+    final expiryString = prefs.getString(expiryKey);
     if (expiryString == null) return false;
 
     final expiryDate = DateTime.parse(expiryString);
@@ -137,21 +165,24 @@ class SubscriptionManager {
     if (!hasPremium) return SubscriptionTier.free;
 
     final prefs = await SharedPreferences.getInstance();
-    final tierIndex = prefs.getInt(_tierKey) ?? 0;
+    final tierKey = await _getTierKey();
+    final tierIndex = prefs.getInt(tierKey) ?? 0;
     return SubscriptionTier.values[tierIndex];
   }
 
   // Get subscription expiry date
   static Future<DateTime?> getExpiryDate() async {
     final prefs = await SharedPreferences.getInstance();
-    final expiryString = prefs.getString(_expiryKey);
+    final expiryKey = await _getExpiryKey();
+    final expiryString = prefs.getString(expiryKey);
     return expiryString != null ? DateTime.parse(expiryString) : null;
   }
 
   // Get purchase date
   static Future<DateTime?> getPurchaseDate() async {
     final prefs = await SharedPreferences.getInstance();
-    final purchaseString = prefs.getString(_purchaseDateKey);
+    final purchaseDateKey = await _getPurchaseDateKey();
+    final purchaseString = prefs.getString(purchaseDateKey);
     return purchaseString != null ? DateTime.parse(purchaseString) : null;
   }
 
@@ -159,20 +190,199 @@ class SubscriptionManager {
   static Future<void> activateSubscription(SubscriptionPlan plan) async {
     final prefs = await SharedPreferences.getInstance();
     final now = DateTime.now();
-    final expiry = now.add(Duration(days: plan.durationMonths * 30));
 
-    await prefs.setInt(_tierKey, plan.tier.index);
-    await prefs.setString(_expiryKey, expiry.toIso8601String());
-    await prefs.setString(_purchaseDateKey, now.toIso8601String());
+    final tierKey = await _getTierKey();
+    final expiryKey = await _getExpiryKey();
+    final purchaseDateKey = await _getPurchaseDateKey();
+
+    // Check if there's an existing active subscription
+    final existingExpiryString = prefs.getString(expiryKey);
+    DateTime expiry;
+    bool isExtension = false;
+
+    if (existingExpiryString != null) {
+      final existingExpiry = DateTime.parse(existingExpiryString);
+
+      // If existing subscription is still active, extend it
+      if (existingExpiry.isAfter(now)) {
+        // Add new duration to existing expiry date
+        expiry = existingExpiry.add(Duration(days: plan.durationMonths * 30));
+        isExtension = true;
+        print('📅 Extending existing subscription');
+        print('   Previous expiry: ${existingExpiry.toString().split(' ')[0]}');
+      } else {
+        // Existing subscription expired, start fresh from now
+        expiry = now.add(Duration(days: plan.durationMonths * 30));
+      }
+    } else {
+      // No existing subscription, start from now
+      expiry = now.add(Duration(days: plan.durationMonths * 30));
+    }
+
+    await prefs.setInt(tierKey, plan.tier.index);
+    await prefs.setString(expiryKey, expiry.toIso8601String());
+    await prefs.setString(purchaseDateKey, now.toIso8601String());
+
+    final userId = await _getUserId();
+    print('✅ Subscription activated for user: $userId');
+    print('   Tier: ${plan.name}');
+    print('   ${isExtension ? "Extended" : "New"} expiry: ${expiry.toString().split(' ')[0]}');
+
+    // Sync to cloud for cross-device access
+    await _syncToSupabase();
   }
 
   // Cancel subscription (revert to free)
   static Future<void> cancelSubscription() async {
     final prefs = await SharedPreferences.getInstance();
-    await prefs.setInt(_tierKey, 0);
-    await prefs.remove(_expiryKey);
-    await prefs.remove(_purchaseDateKey);
+    final tierKey = await _getTierKey();
+    final expiryKey = await _getExpiryKey();
+    final purchaseDateKey = await _getPurchaseDateKey();
+
+    await prefs.setInt(tierKey, 0);
+    await prefs.remove(expiryKey);
+    await prefs.remove(purchaseDateKey);
+
+    final userId = await _getUserId();
+    print('✅ Subscription cancelled for user: $userId');
+
+    // Sync cancellation to cloud
+    await _syncToSupabase();
   }
+
+  // ------------------------- CLOUD SYNC METHODS -------------------------
+
+  // Sync subscription to Supabase (cloud storage)
+  static Future<void> _syncToSupabase() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final supabaseUrl = prefs.getString('supabase_url');
+      final supabaseKey = prefs.getString('supabase_anon_key');
+
+      if (supabaseUrl == null || supabaseKey == null) {
+        print('⚠️ Supabase not configured. Subscription saved locally only.');
+        return;
+      }
+
+      final userId = await _getUserId();
+      final tierKey = await _getTierKey();
+      final expiryKey = await _getExpiryKey();
+      final purchaseDateKey = await _getPurchaseDateKey();
+
+      final tierIndex = prefs.getInt(tierKey) ?? 0;
+      final expiryString = prefs.getString(expiryKey);
+      final purchaseString = prefs.getString(purchaseDateKey);
+
+      final subscriptionData = {
+        'user_id': userId,
+        'tier_index': tierIndex,
+        'tier_name': SubscriptionTier.values[tierIndex].toString().split('.').last,
+        'expiry_date': expiryString,
+        'purchase_date': purchaseString,
+        'updated_at': DateTime.now().toIso8601String(),
+      };
+
+      // Insert to Supabase (creates new record for each purchase/renewal)
+      final response = await http.post(
+        Uri.parse('$supabaseUrl/rest/v1/subscriptions'),
+        headers: {
+          'apikey': supabaseKey,
+          'Authorization': 'Bearer $supabaseKey',
+          'Content-Type': 'application/json',
+          'Prefer': 'return=minimal',
+        },
+        body: jsonEncode(subscriptionData),
+      );
+
+      if (response.statusCode == 201 || response.statusCode == 200) {
+        print('☁️  Subscription synced to cloud');
+        print('   User: $userId');
+        print('   Tier: ${SubscriptionTier.values[tierIndex].toString().split('.').last}');
+      } else {
+        print('⚠️  Failed to sync subscription: ${response.statusCode}');
+        print('   ${response.body}');
+      }
+    } catch (e) {
+      print('⚠️  Cloud sync error: $e');
+      // Don't throw - local storage still works
+    }
+  }
+
+  // Load subscription from Supabase (called on app start or login)
+  static Future<bool> syncFromSupabase() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final supabaseUrl = prefs.getString('supabase_url');
+      final supabaseKey = prefs.getString('supabase_anon_key');
+
+      if (supabaseUrl == null || supabaseKey == null) {
+        print('⚠️ Supabase not configured. Using local subscription data.');
+        return false;
+      }
+
+      final userId = await _getUserId();
+
+      print('☁️  Loading subscription from cloud...');
+
+      // Fetch user's latest subscription from Supabase (most recent first)
+      final response = await http.get(
+        Uri.parse('$supabaseUrl/rest/v1/subscriptions?user_id=eq.$userId&select=*&order=created_at.desc&limit=1'),
+        headers: {
+          'apikey': supabaseKey,
+          'Authorization': 'Bearer $supabaseKey',
+        },
+      );
+
+      if (response.statusCode == 200) {
+        final List<dynamic> data = jsonDecode(response.body);
+
+        if (data.isEmpty) {
+          print('   No cloud subscription found for user');
+          return false;
+        }
+
+        // Get the most recent subscription
+        final subscription = data[0];
+        final tierIndex = subscription['tier_index'] as int;
+        final expiryString = subscription['expiry_date'] as String?;
+        final purchaseString = subscription['purchase_date'] as String?;
+
+        if (expiryString != null) {
+          final expiryDate = DateTime.parse(expiryString);
+
+          // Only sync if not expired
+          if (DateTime.now().isBefore(expiryDate)) {
+            final tierKey = await _getTierKey();
+            final expiryKey = await _getExpiryKey();
+            final purchaseDateKey = await _getPurchaseDateKey();
+
+            await prefs.setInt(tierKey, tierIndex);
+            await prefs.setString(expiryKey, expiryString);
+            if (purchaseString != null) {
+              await prefs.setString(purchaseDateKey, purchaseString);
+            }
+
+            print('✅ Subscription loaded from cloud');
+            print('   Tier: ${SubscriptionTier.values[tierIndex].toString().split('.').last}');
+            print('   Expires: ${expiryDate.toString().split(' ')[0]}');
+            return true;
+          } else {
+            print('   Cloud subscription expired');
+            return false;
+          }
+        }
+      } else {
+        print('⚠️  Failed to fetch subscription: ${response.statusCode}');
+      }
+
+      return false;
+    } catch (e) {
+      print('⚠️  Failed to sync from cloud: $e');
+      return false;
+    }
+  }
+
+  // ------------------------- FEATURE ACCESS METHODS -------------------------
 
   // Check if today is Sunday (for free tier access)
   static bool isSunday() {
@@ -255,14 +465,104 @@ class _EnhancedPaymentPlansPageState extends State<EnhancedPaymentPlansPage> {
 
   Future<void> _selectPlan(SubscriptionPlan plan) async {
     if (plan.tier == SubscriptionTier.free) {
-      _showInfoDialog('You are already on the free plan');
-      return;
+      // Check if user is already on free plan or wants to downgrade
+      if (currentTier == SubscriptionTier.free) {
+        _showInfoDialog('You are already on the free plan');
+        return;
+      } else {
+        // User wants to downgrade from premium to free
+        _showInfoDialog('To cancel your premium subscription, please contact support');
+        return;
+      }
     }
 
-    // Show plan confirmation
+    // Show plan confirmation with proper context handling
     final confirmed = await showDialog<bool>(
       context: context,
-      builder: (context) => _buildPlanConfirmationDialog(plan),
+      barrierDismissible: true, // ✅ Allow dismissing by tapping outside
+      builder: (BuildContext dialogContext) {
+        // ✅ Use separate dialog context
+        return AlertDialog(
+          backgroundColor: const Color(0xFF1E1E1E),
+          title: Text(
+            'Upgrade to ${plan.name}',
+            style: const TextStyle(color: Colors.white),
+          ),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text(
+                'You are about to purchase:',
+                style: TextStyle(color: Colors.white70, fontSize: 14),
+              ),
+              const SizedBox(height: 16),
+              Container(
+                padding: const EdgeInsets.all(16),
+                decoration: BoxDecoration(
+                  color: Colors.amber.withOpacity(0.1),
+                  borderRadius: BorderRadius.circular(12),
+                  border: Border.all(color: Colors.amber.withOpacity(0.3)),
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      plan.name,
+                      style: const TextStyle(
+                        color: Colors.amber,
+                        fontSize: 18,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    Text(
+                      '${plan.priceDisplay} for ${plan.durationDisplay}',
+                      style: const TextStyle(color: Colors.white70),
+                    ),
+                    const SizedBox(height: 4),
+                    Text(
+                      '₦${plan.pricePerMonth.toStringAsFixed(0)}/month',
+                      style: const TextStyle(color: Colors.green, fontSize: 12),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(height: 16),
+              const Text(
+                'You will get access to:',
+                style: TextStyle(color: Colors.white70, fontSize: 12),
+              ),
+              const SizedBox(height: 8),
+              ...plan.features.map(
+                (feature) => Padding(
+                  padding: const EdgeInsets.only(bottom: 4),
+                  child: Text(
+                    feature,
+                    style: const TextStyle(color: Colors.green, fontSize: 12),
+                  ),
+                ),
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () =>
+                  Navigator.pop(dialogContext, false), // ✅ Use dialogContext
+              child: const Text('Cancel', style: TextStyle(color: Colors.grey)),
+            ),
+            ElevatedButton(
+              onPressed: () =>
+                  Navigator.pop(dialogContext, true), // ✅ Use dialogContext
+              style: ElevatedButton.styleFrom(backgroundColor: Colors.amber),
+              child: Text(
+                'Purchase ${plan.priceDisplay}',
+                style: const TextStyle(color: Colors.black),
+              ),
+            ),
+          ],
+        );
+      },
     );
 
     if (confirmed == true) {
@@ -271,193 +571,222 @@ class _EnhancedPaymentPlansPageState extends State<EnhancedPaymentPlansPage> {
     }
   }
 
-  Widget _buildPlanConfirmationDialog(SubscriptionPlan plan) {
-    return AlertDialog(
-      backgroundColor: const Color(0xFF1E1E1E),
-      title: Text(
-        'Upgrade to ${plan.name}',
-        style: const TextStyle(color: Colors.white),
-      ),
-      content: Column(
-        mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text(
-            'You are about to purchase:',
-            style: const TextStyle(color: Colors.white70, fontSize: 14),
-          ),
-          const SizedBox(height: 16),
-          Container(
-            padding: const EdgeInsets.all(16),
-            decoration: BoxDecoration(
-              color: Colors.amber.withOpacity(0.1),
-              borderRadius: BorderRadius.circular(12),
-              border: Border.all(color: Colors.amber.withOpacity(0.3)),
-            ),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  plan.name,
-                  style: const TextStyle(
-                    color: Colors.amber,
-                    fontSize: 18,
-                    fontWeight: FontWeight.bold,
-                  ),
-                ),
-                const SizedBox(height: 8),
-                Text(
-                  '${plan.priceDisplay} for ${plan.durationDisplay}',
-                  style: const TextStyle(color: Colors.white70),
-                ),
-                const SizedBox(height: 4),
-                Text(
-                  '\$${plan.pricePerMonth.toStringAsFixed(2)}/month',
-                  style: const TextStyle(color: Colors.green, fontSize: 12),
-                ),
-              ],
-            ),
-          ),
-          const SizedBox(height: 16),
-          const Text(
-            'You will get access to:',
-            style: TextStyle(color: Colors.white70, fontSize: 12),
-          ),
-          const SizedBox(height: 8),
-          ...plan.features.map(
-            (feature) => Padding(
-              padding: const EdgeInsets.only(bottom: 4),
-              child: Text(
-                feature,
-                style: const TextStyle(color: Colors.green, fontSize: 12),
-              ),
-            ),
-          ),
-        ],
-      ),
-      actions: [
-        TextButton(
-          onPressed: () => Navigator.pop(context, false),
-          child: const Text('Cancel', style: TextStyle(color: Colors.grey)),
-        ),
-        ElevatedButton(
-          onPressed: () => Navigator.pop(context, true),
-          style: ElevatedButton.styleFrom(backgroundColor: Colors.amber),
-          child: Text(
-            'Purchase ${plan.priceDisplay}',
-            style: const TextStyle(color: Colors.black),
-          ),
-        ),
-      ],
-    );
-  }
-
   Future<void> _processPurchase(SubscriptionPlan plan) async {
-    // Show loading dialog
-    showDialog(
-      context: context,
-      barrierDismissible: false,
-      builder: (context) => const Center(
-        child: Card(
-          color: Color(0xFF1E1E1E),
-          child: Padding(
-            padding: EdgeInsets.all(24),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                CircularProgressIndicator(color: Colors.amber),
-                SizedBox(height: 16),
-                Text(
-                  'Processing payment...',
-                  style: TextStyle(color: Colors.white),
-                ),
-              ],
-            ),
-          ),
-        ),
-      ),
-    );
-
-    // Simulate payment processing delay
-    await Future.delayed(const Duration(seconds: 2));
-
-    // Activate subscription
-    await SubscriptionManager.activateSubscription(plan);
-
-    // Reload status
-    await _loadSubscriptionStatus();
-
-    // Close loading dialog
-    if (mounted) Navigator.pop(context);
-
-    // Show success message
-    if (mounted) {
-      showDialog(
+    try {
+      // Initiate Paystack payment directly (Paystack shows its own loading UI)
+      final paymentResponse = await PaystackService.instance.initiatePayment(
         context: context,
-        builder: (context) => AlertDialog(
-          backgroundColor: const Color(0xFF1E1E1E),
-          title: Row(
-            children: [
-              const Icon(Icons.check_circle, color: Colors.green, size: 32),
-              const SizedBox(width: 12),
-              const Text('Success!', style: TextStyle(color: Colors.white)),
-            ],
-          ),
-          content: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(
-                'You have successfully upgraded to ${plan.name}!',
-                style: const TextStyle(color: Colors.white70),
+        amount: plan.price,
+        planName: plan.name,
+        planId: plan.tier.toString(),
+      );
+
+      // Check payment response
+      if (paymentResponse != null && paymentResponse.isSuccessful) {
+        // Payment successful - activate subscription
+        await SubscriptionManager.activateSubscription(plan);
+
+        // Save payment record with user profile link
+        await PaystackService.instance.savePaymentRecord(
+          transactionId: paymentResponse.transactionId,
+          txRef: paymentResponse.txRef,
+          amount: paymentResponse.amount,
+          planId: plan.tier.toString(),
+          planName: plan.name,
+          planDurationMonths: plan.durationMonths,
+          status: 'successful',
+        );
+
+        // Reload status
+        await _loadSubscriptionStatus();
+
+        // Small delay to ensure UI is ready after auto-redirect
+        await Future.delayed(const Duration(milliseconds: 300));
+
+        // Show success message
+        if (mounted) {
+          showDialog(
+            context: context,
+            barrierDismissible: false,
+            builder: (context) => AlertDialog(
+              backgroundColor: const Color(0xFF1E1E1E),
+              title: Row(
+                children: [
+                  const Icon(Icons.check_circle, color: Colors.green, size: 32),
+                  const SizedBox(width: 12),
+                  const Text('Payment Successful!', style: TextStyle(color: Colors.white)),
+                ],
               ),
-              const SizedBox(height: 16),
-              Container(
-                padding: const EdgeInsets.all(12),
-                decoration: BoxDecoration(
-                  color: Colors.green.withOpacity(0.1),
-                  borderRadius: BorderRadius.circular(8),
-                ),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    const Text(
-                      'Your premium features are now active:',
-                      style: TextStyle(
-                        color: Colors.green,
-                        fontWeight: FontWeight.bold,
-                      ),
+              content: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    'You have successfully upgraded to ${plan.name}!',
+                    style: const TextStyle(color: Colors.white70),
+                  ),
+                  const SizedBox(height: 16),
+                  Container(
+                    padding: const EdgeInsets.all(12),
+                    decoration: BoxDecoration(
+                      color: Colors.green.withOpacity(0.1),
+                      borderRadius: BorderRadius.circular(8),
                     ),
-                    const SizedBox(height: 8),
-                    ...plan.features.map(
-                      (feature) => Padding(
-                        padding: const EdgeInsets.only(bottom: 4),
-                        child: Text(
-                          feature,
-                          style: const TextStyle(
-                            color: Colors.white70,
-                            fontSize: 12,
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        const Text(
+                          'Your premium features are now active:',
+                          style: TextStyle(
+                            color: Colors.green,
+                            fontWeight: FontWeight.bold,
                           ),
                         ),
-                      ),
+                        const SizedBox(height: 8),
+                        ...plan.features.map(
+                          (feature) => Padding(
+                            padding: const EdgeInsets.only(bottom: 4),
+                            child: Text(
+                              feature,
+                              style: const TextStyle(
+                                color: Colors.white70,
+                                fontSize: 12,
+                              ),
+                            ),
+                          ),
+                        ),
+                        const SizedBox(height: 12),
+                        const Divider(color: Colors.white24),
+                        const SizedBox(height: 8),
+                        Text(
+                          'Transaction ID: ${paymentResponse.transactionId}',
+                          style: const TextStyle(
+                            color: Colors.white54,
+                            fontSize: 10,
+                          ),
+                        ),
+                      ],
                     ),
-                  ],
+                  ),
+                ],
+              ),
+              actions: [
+                ElevatedButton(
+                  onPressed: () => Navigator.pop(context),
+                  style: ElevatedButton.styleFrom(backgroundColor: Colors.amber),
+                  child: const Text(
+                    'Great!',
+                    style: TextStyle(color: Colors.black),
+                  ),
                 ),
+              ],
+            ),
+          );
+        }
+      } else if (paymentResponse != null && paymentResponse.isCancelled) {
+        // Payment cancelled by user - save to transaction history
+        await PaystackService.instance.savePaymentRecord(
+          transactionId: paymentResponse.transactionId.isNotEmpty
+              ? paymentResponse.transactionId
+              : 'CANCELLED_${DateTime.now().millisecondsSinceEpoch}',
+          txRef: paymentResponse.txRef.isNotEmpty
+              ? paymentResponse.txRef
+              : 'CANCELLED_${DateTime.now().millisecondsSinceEpoch}',
+          amount: paymentResponse.amount,
+          planId: plan.tier.toString(),
+          planName: plan.name,
+          planDurationMonths: plan.durationMonths,
+          status: 'cancelled',
+        );
+
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('Payment cancelled'),
+              backgroundColor: Colors.orange,
+            ),
+          );
+        }
+      } else {
+        // Payment failed - save to transaction history
+        if (paymentResponse != null) {
+          await PaystackService.instance.savePaymentRecord(
+            transactionId: paymentResponse.transactionId.isNotEmpty
+                ? paymentResponse.transactionId
+                : 'FAILED_${DateTime.now().millisecondsSinceEpoch}',
+            txRef: paymentResponse.txRef.isNotEmpty
+                ? paymentResponse.txRef
+                : 'FAILED_${DateTime.now().millisecondsSinceEpoch}',
+            amount: paymentResponse.amount,
+            planId: plan.tier.toString(),
+            planName: plan.name,
+            planDurationMonths: plan.durationMonths,
+            status: 'failed',
+          );
+        }
+
+        final errorMessage = paymentResponse?.message ?? 'Payment failed. Please try again.';
+        if (mounted) {
+          showDialog(
+            context: context,
+            builder: (context) => AlertDialog(
+              backgroundColor: const Color(0xFF1E1E1E),
+              title: Row(
+                children: [
+                  const Icon(Icons.error, color: Colors.red, size: 32),
+                  const SizedBox(width: 12),
+                  const Text('Payment Failed', style: TextStyle(color: Colors.white)),
+                ],
+              ),
+              content: Text(
+                errorMessage,
+                style: const TextStyle(color: Colors.white70),
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.pop(context),
+                  child: const Text('OK', style: TextStyle(color: Colors.amber)),
+                ),
+                ElevatedButton(
+                  onPressed: () {
+                    Navigator.pop(context);
+                    _processPurchase(plan); // Retry payment
+                  },
+                  style: ElevatedButton.styleFrom(backgroundColor: Colors.amber),
+                  child: const Text(
+                    'Try Again',
+                    style: TextStyle(color: Colors.black),
+                  ),
+                ),
+              ],
+            ),
+          );
+        }
+      }
+    } catch (e) {
+      // Handle errors
+      if (mounted) {
+        // Close any open dialogs
+        Navigator.of(context).popUntil((route) => route.isFirst);
+
+        showDialog(
+          context: context,
+          builder: (context) => AlertDialog(
+            backgroundColor: const Color(0xFF1E1E1E),
+            title: const Text('Error', style: TextStyle(color: Colors.white)),
+            content: Text(
+              'An error occurred: ${e.toString()}',
+              style: const TextStyle(color: Colors.white70),
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(context),
+                child: const Text('OK', style: TextStyle(color: Colors.amber)),
               ),
             ],
           ),
-          actions: [
-            ElevatedButton(
-              onPressed: () => Navigator.pop(context),
-              style: ElevatedButton.styleFrom(backgroundColor: Colors.amber),
-              child: const Text(
-                'Great!',
-                style: TextStyle(color: Colors.black),
-              ),
-            ),
-          ],
-        ),
-      );
+        );
+      }
     }
   }
 
@@ -540,7 +869,10 @@ class _EnhancedPaymentPlansPageState extends State<EnhancedPaymentPlansPage> {
           ),
           ElevatedButton(
             onPressed: () async {
-              Navigator.pop(context);
+              final navigator = Navigator.of(context);
+              final messenger = ScaffoldMessenger.of(context);
+
+              navigator.pop();
               final confirm = await showDialog<bool>(
                 context: context,
                 builder: (context) => AlertDialog(
@@ -579,7 +911,7 @@ class _EnhancedPaymentPlansPageState extends State<EnhancedPaymentPlansPage> {
                 await SubscriptionManager.cancelSubscription();
                 await _loadSubscriptionStatus();
                 if (mounted) {
-                  ScaffoldMessenger.of(context).showSnackBar(
+                  messenger.showSnackBar(
                     const SnackBar(
                       content: Text('Subscription cancelled'),
                       backgroundColor: Colors.red,
@@ -839,7 +1171,7 @@ class _EnhancedPaymentPlansPageState extends State<EnhancedPaymentPlansPage> {
                         ),
                         if (isPremiumPlan)
                           Text(
-                            '\$${plan.pricePerMonth.toStringAsFixed(2)}/mo',
+                            '₦${plan.pricePerMonth.toStringAsFixed(0)}/mo',
                             style: const TextStyle(
                               color: Colors.green,
                               fontSize: 12,

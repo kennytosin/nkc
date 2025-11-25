@@ -7,6 +7,8 @@ import 'package:sqflite/sqflite.dart';
 import 'package:path/path.dart' as p;
 import 'package:shared_preferences/shared_preferences.dart';
 import 'main.dart';
+import 'feature_restrictions.dart';
+import 'premium_feature_gate.dart';
 
 // Note: This file works independently of main.dart
 // It uses dynamic typing to avoid circular dependencies
@@ -594,14 +596,47 @@ class EnhancedDevotionalDetailPage extends StatefulWidget {
 }
 
 class _EnhancedDevotionalDetailPageState
-    extends State<EnhancedDevotionalDetailPage> {
+    extends State<EnhancedDevotionalDetailPage> with WidgetsBindingObserver {
   bool _isFavorite = false;
   bool _isDownloaded = false;
 
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _checkStatus();
+    _setupScreenshotProtection();
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+
+  Future<void> _setupScreenshotProtection() async {
+    await FeatureRestrictions.setupScreenshotProtection(context);
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    // Detect screenshot attempts
+    if (state == AppLifecycleState.inactive) {
+      _onPossibleScreenshot();
+    }
+  }
+
+  Future<void> _onPossibleScreenshot() async {
+    final canScreenshot = await FeatureRestrictions.canTakeScreenshots();
+
+    if (!canScreenshot && mounted) {
+      // Show warning after short delay
+      Future.delayed(const Duration(milliseconds: 500), () {
+        if (mounted) {
+          FeatureRestrictions.showScreenshotWarning(context);
+        }
+      });
+    }
   }
 
   Future<void> _checkStatus() async {
@@ -631,24 +666,13 @@ class _EnhancedDevotionalDetailPageState
     });
   }
 
-  Future<void> _checkIfDownloaded() async {
-    try {
-      final devotionalId = widget.devotional.id?.toString() ?? '';
-      if (devotionalId.isEmpty) return;
-
-      final isDownloaded = await DownloadsDatabase.instance.isDownloaded(
-        devotionalId,
-      );
-
-      setState(() {
-        _isDownloaded = isDownloaded;
-      });
-    } catch (e) {
-      print('Error checking download status: $e');
-    }
-  }
-
   Future<void> _downloadDevotional() async {
+    // Check if user has permission to download
+    final canDownload = await FeatureRestrictions.canDownloadOffline(context);
+    if (!canDownload) {
+      return; // Upgrade dialog already shown
+    }
+
     // Validation
     final devotionalId = widget.devotional.id?.toString() ?? '';
     final devotionalTitle = widget.devotional.title?.toString() ?? '';

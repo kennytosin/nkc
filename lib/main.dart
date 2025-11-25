@@ -18,7 +18,12 @@ import 'package:timezone/timezone.dart' as tz;
 import 'package:http/http.dart' as http;
 import 'package:image_picker/image_picker.dart';
 import 'payment_plans_enhancement.dart';
-import 'package:device_preview/device_preview.dart';
+import 'payment_history_page.dart';
+import 'paystack_service.dart';
+import 'payment_database.dart';
+import 'supabase_config.dart';
+import 'feature_restrictions.dart';
+import 'premium_feature_gate.dart';
 import 'package:flutter/foundation.dart';
 import 'package:path_provider/path_provider.dart';
 
@@ -473,6 +478,23 @@ class CloudSyncManager {
       print('🌐 Starting full cloud sync...');
       await fullFavoritesSync(userId);
       await fullSettingsSync(userId);
+
+      // Sync subscription from cloud
+      try {
+        print('☁️ Syncing subscription from cloud...');
+        await SubscriptionManager.syncFromSupabase();
+      } catch (e) {
+        print('⚠️ Could not sync subscription: $e');
+      }
+
+      // Sync payment history from cloud
+      try {
+        print('☁️ Syncing payment history from cloud...');
+        await PaymentDatabase.instance.syncPaymentsFromSupabase(userId);
+      } catch (e) {
+        print('⚠️ Could not sync payment history: $e');
+      }
+
       print('✅ All data synced successfully');
     } catch (e) {
       print('❌ Error during full sync: $e');
@@ -865,6 +887,15 @@ class _UserProfilePageState extends State<UserProfilePage>
                   label: 'Change PIN',
                   onTap: () => _changePassword(),
                   color: Colors.green,
+                ),
+
+                const SizedBox(height: 12),
+
+                _buildActionButton(
+                  icon: Icons.payment,
+                  label: 'Payment History',
+                  onTap: () => _openPaymentHistory(),
+                  color: Colors.purple,
                 ),
 
                 const SizedBox(height: 40),
@@ -1693,6 +1724,16 @@ class _UserProfilePageState extends State<UserProfilePage>
       }
     }
   }
+
+  // Open Payment History Page
+  void _openPaymentHistory() {
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (context) => const PaymentHistoryPage(),
+      ),
+    );
+  }
 }
 
 // ------------------------- DEVOTIONAL MODEL -------------------------
@@ -1946,10 +1987,10 @@ Future<Map<String, dynamic>?> loginUser({
   required String pin,
 }) async {
   try {
-    // ✅ Add birthday to the select query
+    // ✅ Add birthday and email to the select query
     final response = await Supabase.instance.client
         .from('users')
-        .select('id, name, pin, birthday, created_at') // ✅ Added birthday
+        .select('id, name, pin, email, birthday, created_at') // ✅ Added birthday and email
         .eq('name', name.toLowerCase())
         .eq('pin', pin)
         .limit(1)
@@ -2140,6 +2181,12 @@ class _AuthPageState extends State<AuthPage>
           final userId = user['id'] as String;
           await prefs.setString('user_id', userId);
 
+          // ✅ Save user email to SharedPreferences
+          final userEmail = user['email'] as String?;
+          if (userEmail != null && userEmail.isNotEmpty) {
+            await prefs.setString('user_email', userEmail);
+          }
+
           try {
             await NotificationService.initialize();
             print('🔔 Notification service initialized for new login');
@@ -2198,6 +2245,12 @@ class _AuthPageState extends State<AuthPage>
           final userId = user['id'] as String;
           await prefs.setString('user_id', userId);
 
+          // ✅ Save user email to SharedPreferences
+          final userEmail = user['email'] as String?;
+          if (userEmail != null && userEmail.isNotEmpty) {
+            await prefs.setString('user_email', userEmail);
+          }
+
           // ✅ NEW: Setup birthday notification for new user
           if (_selectedBirthday != null) {
             try {
@@ -2210,6 +2263,14 @@ class _AuthPageState extends State<AuthPage>
             } catch (e) {
               print('❌ Failed to setup birthday notification: $e');
             }
+          }
+
+          // Sync data from cloud (in case registering on second device)
+          try {
+            await CloudSyncManager.instance.syncAll(userId);
+            print('✅ All data synced from cloud after registration');
+          } catch (e) {
+            print('⚠️ Could not sync data from cloud: $e');
           }
         }
 
@@ -2830,8 +2891,19 @@ class NotificationService {
   }
 
   /// Handle notification tap
+  /// Handle notification tap - mark birthday notification as shown
   static void _onNotificationTapped(NotificationResponse response) {
     print('Notification tapped: ${response.payload}');
+
+    // ✅ If it's a birthday notification, mark it as shown
+    if (response.payload == 'birthday_wish' ||
+        response.payload == 'birthday_wish_immediate') {
+      SharedPreferences.getInstance().then((prefs) {
+        final today = DateFormat('yyyy-MM-dd').format(DateTime.now());
+        prefs.setString('last_birthday_notification', today);
+        print('✅ Marked birthday notification as shown for $today');
+      });
+    }
   }
 
   /// Enable daily notifications at specified time
@@ -3149,6 +3221,7 @@ class NotificationService {
   // ✅ BIRTHDAY NOTIFICATION METHODS
 
   /// Setup birthday notification
+  // ✅ UPDATED: Setup birthday notification with image
   static Future<void> setupBirthdayNotification({
     required String userName,
     required DateTime birthday,
@@ -3172,14 +3245,50 @@ class NotificationService {
 
       if (isBirthdayToday) {
         print('   🎉 TODAY IS THE BIRTHDAY!');
-        final age = now.year - birthday.year;
-        print('   Age: $age');
 
-        await sendImmediateBirthdayNotification(userName, age);
-        print('   ✅ Immediate notification sent');
+        // ✅ Check if we've already shown the notification today
+        final prefs = await SharedPreferences.getInstance();
+        final lastShownDate = prefs.getString('last_birthday_notification');
+        final todayString = DateFormat('yyyy-MM-dd').format(now);
 
-        await _scheduleNextYearBirthday(userName, birthday);
-        print('   ✅ Next year notification scheduled');
+        if (lastShownDate == todayString) {
+          print('   ⏭️ Birthday notification already shown today');
+          await _scheduleNextBirthday(userName, birthday);
+        } else {
+          final midnightToday = tz.TZDateTime(
+            tz.local,
+            now.year,
+            now.month,
+            now.day,
+            0,
+            0,
+          );
+
+          if (now.isAfter(midnightToday)) {
+            print('   🎂 Past midnight on birthday - sending notification now');
+            await _sendBirthdayNotificationNow(
+              userName,
+              now.year - birthday.year,
+            );
+            await prefs.setString('last_birthday_notification', todayString);
+            await _scheduleNextBirthday(userName, birthday);
+          } else {
+            print('   ⏰ Before midnight on birthday - scheduling for midnight');
+            final midnightSchedule = tz.TZDateTime(
+              tz.local,
+              now.year,
+              now.month,
+              now.day,
+              0,
+              0,
+            );
+            await _scheduleBirthdayNotificationAt(
+              userName,
+              now.year - birthday.year,
+              midnightSchedule,
+            );
+          }
+        }
       } else {
         print('   📅 Birthday is not today, scheduling for next occurrence');
         await _scheduleNextBirthday(userName, birthday);
@@ -3192,7 +3301,7 @@ class NotificationService {
     }
   }
 
-  /// Schedule next birthday notification
+  // ✅ UPDATED: Schedule next birthday notification with image
   static Future<void> _scheduleNextBirthday(
     String userName,
     DateTime birthday,
@@ -3204,7 +3313,6 @@ class NotificationService {
       print('   Current date: ${DateFormat('yyyy-MM-dd').format(now)}');
 
       DateTime nextBirthday = DateTime(now.year, birthday.month, birthday.day);
-
       print(
         '   Initial next birthday: ${DateFormat('yyyy-MM-dd').format(nextBirthday)}',
       );
@@ -3235,21 +3343,26 @@ class NotificationService {
         '   Days until birthday: ${nextBirthday.difference(DateTime.now()).inDays}',
       );
 
-      // Load birthday image
-      final ByteData bytes = await rootBundle.load(
+      // ✅ Load birthday cake image as bitmap
+      final ByteData imageData = await rootBundle.load(
         'assets/images/birthday_cake.png',
       );
-      final Uint8List byteList = bytes.buffer.asUint8List();
-      print('   ✅ Birthday image loaded (${byteList.length} bytes)');
+      final Uint8List imageBytes = imageData.buffer.asUint8List();
+
+      // Save to temp file for Android notification
+      final tempDir = await getTemporaryDirectory();
+      final imagePath = '${tempDir.path}/birthday_cake.png';
+      final imageFile = File(imagePath);
+      await imageFile.writeAsBytes(imageBytes);
 
       final BigPictureStyleInformation
       bigPictureStyle = BigPictureStyleInformation(
-        ByteArrayAndroidBitmap(byteList),
-        largeIcon: const DrawableResourceAndroidBitmap('@mipmap/ic_launcher'),
-        contentTitle: '🎉 Happy Birthday, $userName!',
-        summaryText:
-            'Wishing you a blessed day filled with God\'s grace and love. May this year bring you closer to Him! 🙏✨',
+        FilePathAndroidBitmap(imagePath),
+        largeIcon: FilePathAndroidBitmap(imagePath),
+        contentTitle: '🎉 Happy Birthday, $userName! 🎂',
         htmlFormatContentTitle: true,
+        summaryText:
+            'Wishing you a blessed birthday filled with God\'s grace and love!',
         htmlFormatSummaryText: true,
       );
 
@@ -3265,150 +3378,7 @@ class NotificationService {
             enableLights: true,
             color: const Color(0xFFFFC107),
             icon: '@mipmap/ic_launcher',
-            styleInformation: bigPictureStyle,
-          );
-
-      final NotificationDetails notificationDetails = NotificationDetails(
-        android: androidDetails,
-      );
-
-      await _notifications.zonedSchedule(
-        2000, // Birthday notification ID
-        '🎉 Happy Birthday, $userName!',
-        'Wishing you a blessed day filled with God\'s grace and love. May this year bring you closer to Him! 🙏✨',
-        scheduledDate,
-        notificationDetails,
-        androidScheduleMode: AndroidScheduleMode.exactAllowWhileIdle,
-        matchDateTimeComponents: DateTimeComponents.dayOfMonthAndTime,
-        payload: 'birthday_wish',
-      );
-
-      print('   ✅ Birthday notification scheduled successfully');
-      print('   Notification ID: 2000');
-      print('📅 === SCHEDULING COMPLETE ===');
-    } catch (e) {
-      print('❌ Error scheduling birthday: $e');
-    }
-  }
-
-  /// Send immediate birthday notification
-  static Future<void> sendImmediateBirthdayNotification(
-    String userName,
-    int age,
-  ) async {
-    try {
-      print('🎉 === SENDING IMMEDIATE BIRTHDAY NOTIFICATION ===');
-      print('   User: $userName');
-      print('   Age: $age');
-
-      // Load custom birthday image
-      final ByteData bytes = await rootBundle.load(
-        'assets/images/birthday_cake.png',
-      );
-      final Uint8List byteList = bytes.buffer.asUint8List();
-      print('   ✅ Image loaded (${byteList.length} bytes)');
-
-      final BigPictureStyleInformation
-      bigPictureStyle = BigPictureStyleInformation(
-        ByteArrayAndroidBitmap(byteList),
-        largeIcon: const DrawableResourceAndroidBitmap('@mipmap/ic_launcher'),
-        contentTitle: '🎉 Happy Birthday, $userName!',
-        summaryText:
-            'Wishing you a blessed day filled with God\'s grace and love. May this year bring you closer to Him! 🙏✨',
-        htmlFormatContentTitle: true,
-        htmlFormatSummaryText: true,
-      );
-
-      final AndroidNotificationDetails androidDetails =
-          AndroidNotificationDetails(
-            'birthday_channel',
-            'Birthday Wishes',
-            channelDescription: 'Birthday celebration notifications',
-            importance: Importance.max,
-            priority: Priority.max,
-            playSound: true,
-            enableVibration: true,
-            enableLights: true,
-            color: const Color(0xFFFFC107),
-            icon: '@mipmap/ic_launcher',
-            styleInformation: bigPictureStyle,
-          );
-
-      final NotificationDetails notificationDetails = NotificationDetails(
-        android: androidDetails,
-      );
-
-      await _notifications.show(
-        2001, // Immediate birthday notification ID
-        '🎉 Happy Birthday, $userName!',
-        'Wishing you a blessed day filled with God\'s grace and love. May this year bring you closer to Him! 🙏✨',
-        notificationDetails,
-        payload: 'birthday_wish_immediate',
-      );
-
-      print('   ✅ Immediate notification sent successfully');
-      print('   Notification ID: 2001');
-      print('🎉 === IMMEDIATE NOTIFICATION COMPLETE ===');
-    } catch (e) {
-      print('❌ Error sending immediate birthday notification: $e');
-    }
-  }
-
-  /// Schedule next year birthday notification
-  static Future<void> _scheduleNextYearBirthday(
-    String userName,
-    DateTime birthday,
-  ) async {
-    try {
-      print('📅 === SCHEDULING NEXT YEAR BIRTHDAY ===');
-
-      final now = tz.TZDateTime.now(tz.local);
-      final nextYear = now.year + 1;
-      final age = nextYear - birthday.year;
-
-      print('   Next year: $nextYear');
-      print('   Age next year: $age');
-
-      final scheduledDate = tz.TZDateTime(
-        tz.local,
-        nextYear,
-        birthday.month,
-        birthday.day,
-        0,
-        0,
-      );
-
-      print('   Scheduled for: $scheduledDate');
-
-      // Load custom birthday image
-      final ByteData bytes = await rootBundle.load(
-        'assets/images/birthday_cake.png',
-      );
-      final Uint8List byteList = bytes.buffer.asUint8List();
-
-      final BigPictureStyleInformation
-      bigPictureStyle = BigPictureStyleInformation(
-        ByteArrayAndroidBitmap(byteList),
-        largeIcon: const DrawableResourceAndroidBitmap('@mipmap/ic_launcher'),
-        contentTitle: '🎉 Happy Birthday, $userName!',
-        summaryText:
-            'Wishing you a blessed day filled with God\'s grace and love. May this year bring you closer to Him! 🙏✨',
-        htmlFormatContentTitle: true,
-        htmlFormatSummaryText: true,
-      );
-
-      final AndroidNotificationDetails androidDetails =
-          AndroidNotificationDetails(
-            'birthday_channel',
-            'Birthday Wishes',
-            channelDescription: 'Birthday celebration notifications',
-            importance: Importance.max,
-            priority: Priority.max,
-            playSound: true,
-            enableVibration: true,
-            enableLights: true,
-            color: const Color(0xFFFFC107),
-            icon: '@mipmap/ic_launcher',
+            largeIcon: FilePathAndroidBitmap(imagePath),
             styleInformation: bigPictureStyle,
           );
 
@@ -3418,8 +3388,8 @@ class NotificationService {
 
       await _notifications.zonedSchedule(
         2000,
-        '🎉 Happy Birthday, $userName!',
-        'Wishing you a blessed day filled with God\'s grace and love. May this year bring you closer to Him! 🙏✨',
+        '🎉 Happy Birthday, $userName! 🎂',
+        'Wishing you a blessed birthday! 🙏✨',
         scheduledDate,
         notificationDetails,
         androidScheduleMode: AndroidScheduleMode.exactAllowWhileIdle,
@@ -3427,12 +3397,151 @@ class NotificationService {
         payload: 'birthday_wish',
       );
 
-      print('   ✅ Next year birthday scheduled successfully');
-      print('📅 === NEXT YEAR SCHEDULING COMPLETE ===');
+      print('   ✅ Birthday notification with image scheduled successfully');
+      print('   Notification ID: 2000');
+      print('📅 === SCHEDULING COMPLETE ===');
     } catch (e) {
-      print('❌ Error scheduling next year birthday: $e');
+      print('❌ Error scheduling birthday: $e');
     }
   }
+
+  // ✅ UPDATED: Send birthday notification now with image
+  static Future<void> _sendBirthdayNotificationNow(
+    String userName,
+    int age,
+  ) async {
+    try {
+      print('🎉 === SENDING BIRTHDAY NOTIFICATION NOW ===');
+      print('   User: $userName');
+      print('   Age: $age');
+
+      // ✅ Load birthday cake image
+      final ByteData imageData = await rootBundle.load(
+        'assets/images/birthday_cake.png',
+      );
+      final Uint8List imageBytes = imageData.buffer.asUint8List();
+
+      final tempDir = await getTemporaryDirectory();
+      final imagePath = '${tempDir.path}/birthday_cake.png';
+      final imageFile = File(imagePath);
+      await imageFile.writeAsBytes(imageBytes);
+
+      final BigPictureStyleInformation
+      bigPictureStyle = BigPictureStyleInformation(
+        FilePathAndroidBitmap(imagePath),
+        largeIcon: FilePathAndroidBitmap(imagePath),
+        contentTitle: '🎉 Happy Birthday, $userName! 🎂',
+        htmlFormatContentTitle: true,
+        summaryText:
+            'Wishing you a blessed ${age}th birthday filled with God\'s grace and love! 🙏✨',
+        htmlFormatSummaryText: true,
+      );
+
+      final AndroidNotificationDetails androidDetails =
+          AndroidNotificationDetails(
+            'birthday_channel',
+            'Birthday Wishes',
+            channelDescription: 'Birthday celebration notifications',
+            importance: Importance.max,
+            priority: Priority.max,
+            playSound: true,
+            enableVibration: true,
+            enableLights: true,
+            color: const Color(0xFFFFC107),
+            icon: '@mipmap/ic_launcher',
+            largeIcon: FilePathAndroidBitmap(imagePath),
+            styleInformation: bigPictureStyle,
+          );
+
+      final NotificationDetails notificationDetails = NotificationDetails(
+        android: androidDetails,
+      );
+
+      await _notifications.show(
+        2001,
+        '🎉 Happy Birthday, $userName! 🎂',
+        'Wishing you a blessed ${age}th birthday! 🙏✨',
+        notificationDetails,
+        payload: 'birthday_wish_immediate',
+      );
+
+      print('   ✅ Birthday notification with image sent successfully');
+      print('🎉 === NOTIFICATION SENT ===');
+    } catch (e) {
+      print('❌ Error sending birthday notification: $e');
+    }
+  }
+
+  // ✅ UPDATED: Schedule birthday notification at specific time with image
+  static Future<void> _scheduleBirthdayNotificationAt(
+    String userName,
+    int age,
+    tz.TZDateTime scheduledDate,
+  ) async {
+    try {
+      print('📅 === SCHEDULING BIRTHDAY FOR MIDNIGHT ===');
+      print('   Scheduled for: $scheduledDate');
+
+      // ✅ Load birthday cake image
+      final ByteData imageData = await rootBundle.load(
+        'assets/images/birthday_cake.png',
+      );
+      final Uint8List imageBytes = imageData.buffer.asUint8List();
+
+      final tempDir = await getTemporaryDirectory();
+      final imagePath = '${tempDir.path}/birthday_cake.png';
+      final imageFile = File(imagePath);
+      await imageFile.writeAsBytes(imageBytes);
+
+      final BigPictureStyleInformation
+      bigPictureStyle = BigPictureStyleInformation(
+        FilePathAndroidBitmap(imagePath),
+        largeIcon: FilePathAndroidBitmap(imagePath),
+        contentTitle: '🎉 Happy Birthday, $userName! 🎂',
+        htmlFormatContentTitle: true,
+        summaryText:
+            'Wishing you a blessed ${age}th birthday filled with God\'s grace and love! 🙏✨',
+        htmlFormatSummaryText: true,
+      );
+
+      final AndroidNotificationDetails androidDetails =
+          AndroidNotificationDetails(
+            'birthday_channel',
+            'Birthday Wishes',
+            channelDescription: 'Birthday celebration notifications',
+            importance: Importance.max,
+            priority: Priority.max,
+            playSound: true,
+            enableVibration: true,
+            enableLights: true,
+            color: const Color(0xFFFFC107),
+            icon: '@mipmap/ic_launcher',
+            largeIcon: FilePathAndroidBitmap(imagePath),
+            styleInformation: bigPictureStyle,
+          );
+
+      final NotificationDetails notificationDetails = NotificationDetails(
+        android: androidDetails,
+      );
+
+      await _notifications.zonedSchedule(
+        2000,
+        '🎉 Happy Birthday, $userName! 🎂',
+        'Wishing you a blessed ${age}th birthday! 🙏✨',
+        scheduledDate,
+        notificationDetails,
+        androidScheduleMode: AndroidScheduleMode.exactAllowWhileIdle,
+        payload: 'birthday_wish',
+      );
+
+      print('   ✅ Birthday notification with image scheduled');
+      print('📅 === SCHEDULING COMPLETE ===');
+    } catch (e) {
+      print('❌ Error scheduling birthday notification: $e');
+    }
+  }
+
+  /// Send immediate birthday notification
 }
 
 // Extension to make TimeOfDay formatting easier
@@ -3466,11 +3575,27 @@ void main() async {
 
   await SystemChrome.setPreferredOrientations([DeviceOrientation.portraitUp]);
 
-  await Supabase.initialize(
-    url: 'https://mmwxmkenjsojevilyxyx.supabase.co',
-    anonKey:
-        'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im1td3hta2VuanNvamV2aWx5eHl4Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTIwOTkwNTcsImV4cCI6MjA2NzY3NTA1N30.W7uO_wePLk9y8-8nqj3aT9KZFABjFVouiS4ixVFu9Pw',
-  );
+  // Initialize Supabase (also stores credentials in SharedPreferences for payment sync)
+  await SupabaseConfig.initialize();
+
+  // Initialize Paystack
+  await PaystackService.initialize();
+
+  // Sync subscription from cloud (cross-device support)
+  try {
+    await SubscriptionManager.syncFromSupabase();
+  } catch (e) {
+    print('Note: Could not sync subscription from cloud: $e');
+  }
+
+  // Sync payment history from cloud (cross-device support)
+  try {
+    final userManager = UserManager.instance;
+    final userId = await userManager.getUserId();
+    await PaymentDatabase.instance.syncPaymentsFromSupabase(userId);
+  } catch (e) {
+    print('Note: Could not sync payment history from cloud: $e');
+  }
 
   // Load and apply saved notification settings
   await NotificationService.loadAndApplySettings();
@@ -3484,20 +3609,47 @@ void main() async {
   // 🔑 Check if user is already logged in
   final isLoggedIn = await checkLoginStatus();
 
+  // 🔧 Fetch and save user email if missing (for existing users)
+  if (isLoggedIn) {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final hasEmail = prefs.getString('user_email') != null;
+
+      if (!hasEmail) {
+        final userId = prefs.getString('user_id');
+        final userName = prefs.getString('user_name');
+
+        if (userId != null && userName != null) {
+          print('📧 Fetching user email from Supabase...');
+          final response = await Supabase.instance.client
+              .from('users')
+              .select('email')
+              .eq('id', userId)
+              .limit(1)
+              .maybeSingle();
+
+          if (response != null && response['email'] != null) {
+            await prefs.setString('user_email', response['email'] as String);
+            print('✅ User email saved: ${response['email']}');
+          }
+        }
+      }
+    } catch (e) {
+      print('⚠️ Could not fetch user email: $e');
+    }
+  }
+
   // ✅ NEW: Clean up any incomplete downloads from previous session
   await BibleTranslationManager.instance.cleanupIncompleteDownloads();
 
   runApp(
-    DevicePreview(
-      enabled: !kReleaseMode, // ✅ Only enabled in debug mode
-      builder: (context) => ScreenUtilInit(
-        designSize: const Size(375, 812),
-        minTextAdapt: true,
-        splitScreenMode: true,
-        builder: (context, child) {
-          return DevotionalApp(isLoggedIn: isLoggedIn);
-        },
-      ),
+    ScreenUtilInit(
+      designSize: const Size(375, 812),
+      minTextAdapt: true,
+      splitScreenMode: true,
+      builder: (context, child) {
+        return DevotionalApp(isLoggedIn: isLoggedIn);
+      },
     ),
   );
 }
@@ -3934,6 +4086,7 @@ class _BibleSearchPageState extends State<BibleSearchPage> {
       setState(() {
         isSearching = false;
       });
+      if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: Text('Search failed: $e'),
@@ -4388,11 +4541,6 @@ class DevotionalApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      // ✅ Add these three lines for Device Preview
-      useInheritedMediaQuery: true,
-      locale: DevicePreview.locale(context),
-      builder: DevicePreview.appBuilder,
-
       debugShowCheckedModeBanner: false,
       title: 'NKC Devotional',
       theme: ThemeData(
@@ -4445,6 +4593,22 @@ class MorePage extends StatelessWidget {
     if (confirmed == true) {
       // 🔑 Clear login session
       final prefs = await SharedPreferences.getInstance();
+
+      // Clear subscription data for current user (before removing user_id)
+      try {
+        final userId = prefs.getString('user_id');
+        if (userId != null) {
+          await prefs.remove('${userId}_subscription_tier');
+          await prefs.remove('${userId}_subscription_expiry');
+          await prefs.remove('${userId}_subscription_purchase_date');
+          print('🧹 Cleared subscription data for user: $userId');
+        }
+      } catch (e) {
+        print('⚠️ Could not clear subscription data: $e');
+      }
+
+      // Clear payment database (local SQLite will be cleared on next login via sync)
+
       await prefs.remove('is_logged_in');
       await prefs.remove('user_name');
       await prefs.remove('user_id'); // ✅ Clear user ID
@@ -5541,7 +5705,19 @@ class _CalendarPageState extends State<CalendarPage> {
 
                 return GestureDetector(
                   onTap: hasDevotional
-                      ? () {
+                      ? () async {
+                          // Check if user can access this devotional
+                          final canAccess = await FeatureRestrictions.canAccessDevotional(
+                            devotionalForDay.date,
+                          );
+
+                          if (!canAccess) {
+                            // Show upgrade dialog for weekday devotionals
+                            await FeatureRestrictions.showWeekdayDevotionalLock(context);
+                            return;
+                          }
+
+                          // User has access - navigate to devotional
                           Navigator.push(
                             context,
                             MaterialPageRoute(
@@ -5663,11 +5839,15 @@ class _AddDevotionalPageState extends State<AddDevotionalPage> {
         date: _selectedDate,
       );
 
+      if (!mounted) return;
+
       ScaffoldMessenger.of(
         context,
       ).showSnackBar(const SnackBar(content: Text('Devotional added!')));
 
       await Future.delayed(const Duration(milliseconds: 500));
+
+      if (!mounted) return;
 
       _titleController.clear();
       _contentController.clear();
@@ -6168,9 +6348,11 @@ class _BlurBottomSheetState extends State<BlurBottomSheet>
                   print("Entered: $enteredPassword");
                   print("Stored: $storedPassword");
 
+                  if (!dialogContext.mounted) return;
                   Navigator.of(dialogContext).pop(); // close dialog
                   await Future.delayed(const Duration(milliseconds: 200));
 
+                  if (!parentContext.mounted) return;
                   if (enteredPassword == storedPassword) {
                     widget.onDismiss(); // close blur sheet
                     Navigator.of(parentContext).push(
@@ -6184,13 +6366,17 @@ class _BlurBottomSheetState extends State<BlurBottomSheet>
                     );
                   }
                 } catch (e) {
-                  Navigator.of(dialogContext).pop();
+                  if (dialogContext.mounted) {
+                    Navigator.of(dialogContext).pop();
+                  }
                   await Future.delayed(const Duration(milliseconds: 200));
-                  ScaffoldMessenger.of(parentContext).showSnackBar(
-                    const SnackBar(
-                      content: Text("❗ Error validating password"),
-                    ),
-                  );
+                  if (parentContext.mounted) {
+                    ScaffoldMessenger.of(parentContext).showSnackBar(
+                      const SnackBar(
+                        content: Text("❗ Error validating password"),
+                      ),
+                    );
+                  }
                 }
               },
               child: const Text("Submit"),
@@ -6857,13 +7043,46 @@ class DevotionalDetailPage extends StatefulWidget {
   State<DevotionalDetailPage> createState() => _DevotionalDetailPageState();
 }
 
-class _DevotionalDetailPageState extends State<DevotionalDetailPage> {
+class _DevotionalDetailPageState extends State<DevotionalDetailPage> with WidgetsBindingObserver {
   bool _isDownloaded = false;
 
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _checkIfDownloaded();
+    _setupScreenshotProtection();
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+
+  Future<void> _setupScreenshotProtection() async {
+    await FeatureRestrictions.setupScreenshotProtection(context);
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    // Detect screenshot attempts
+    if (state == AppLifecycleState.inactive) {
+      _onPossibleScreenshot();
+    }
+  }
+
+  Future<void> _onPossibleScreenshot() async {
+    final canScreenshot = await FeatureRestrictions.canTakeScreenshots();
+
+    if (!canScreenshot && mounted) {
+      // Show warning after short delay
+      Future.delayed(const Duration(milliseconds: 500), () {
+        if (mounted) {
+          FeatureRestrictions.showScreenshotWarning(context);
+        }
+      });
+    }
   }
 
   Future<void> _checkIfDownloaded() async {
@@ -6876,6 +7095,12 @@ class _DevotionalDetailPageState extends State<DevotionalDetailPage> {
   }
 
   Future<void> _downloadDevotional() async {
+    // Check if user has permission to download
+    final canDownload = await FeatureRestrictions.canDownloadOffline(context);
+    if (!canDownload) {
+      return; // Upgrade dialog already shown
+    }
+
     if (widget.devotional.id.isEmpty ||
         widget.devotional.content.trim().isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
@@ -6885,6 +7110,9 @@ class _DevotionalDetailPageState extends State<DevotionalDetailPage> {
     }
 
     await DownloadsDatabase.instance.insertDevotional(widget.devotional);
+
+    if (!mounted) return;
+
     setState(() {
       _isDownloaded = true;
     });
@@ -9100,15 +9328,13 @@ class _BibleTranslationsDownloadPageState
   }
 
   // ✅ UPDATED: Prevent back navigation during download
-  Future<bool> _onWillPop() async {
-    if (isDownloading) {
-      _showErrorSnackBar('Please wait for the download to complete');
-      return false; // Prevent navigation
-    }
-    return true; // Allow navigation
-  }
-
   Future<void> _downloadTranslation(BibleTranslation translation) async {
+    // Check if user has permission to download
+    final canDownload = await FeatureRestrictions.canDownloadOffline(context);
+    if (!canDownload) {
+      return; // Upgrade dialog already shown
+    }
+
     setState(() {
       translation.isDownloading = true;
       translation.downloadProgress = 0.0;
@@ -9150,6 +9376,17 @@ class _BibleTranslationsDownloadPageState
       return;
     }
 
+    // Check if user can access this translation (ASV is always free)
+    final canAccess = await FeatureRestrictions.canAccessTranslation(
+      context: context,
+      translationCode: translation.id,
+      translationName: translation.name,
+    );
+
+    if (!canAccess) {
+      return; // Upgrade dialog already shown
+    }
+
     try {
       await BibleTranslationManager.instance.setCurrentTranslation(
         translation.id,
@@ -9189,9 +9426,14 @@ class _BibleTranslationsDownloadPageState
 
   @override
   Widget build(BuildContext context) {
-    // ✅ UPDATED: Wrap with WillPopScope to prevent back navigation during download
-    return WillPopScope(
-      onWillPop: _onWillPop,
+    // ✅ UPDATED: Wrap with PopScope to prevent back navigation during download
+    return PopScope(
+      canPop: !isDownloading,
+      onPopInvokedWithResult: (didPop, result) {
+        if (!didPop && isDownloading) {
+          _showErrorSnackBar('Please wait for the download to complete');
+        }
+      },
       child: Scaffold(
         appBar: AppBar(
           title: const Text("📥 Bible Translations"),
@@ -9808,6 +10050,8 @@ class _EnhancedBibleChapterPageState extends State<EnhancedBibleChapterPage> {
           referenceId: referenceId,
         );
 
+        if (!mounted) return;
+
         setState(() {
           favoriteVerses[verse.verse] = false;
         });
@@ -9832,6 +10076,8 @@ class _EnhancedBibleChapterPageState extends State<EnhancedBibleChapterPage> {
           translationId: currentTranslationId,
         );
 
+        if (!mounted) return;
+
         setState(() {
           favoriteVerses[verse.verse] = true;
         });
@@ -9844,6 +10090,7 @@ class _EnhancedBibleChapterPageState extends State<EnhancedBibleChapterPage> {
         );
       }
     } catch (e) {
+      if (!mounted) return;
       ScaffoldMessenger.of(
         context,
       ).showSnackBar(SnackBar(content: Text('Error: $e')));

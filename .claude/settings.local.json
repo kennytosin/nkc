@@ -7,7 +7,9 @@
       "Bash(flutter build:*)",
       "Bash(dart analyze:*)",
       "Bash(cat:*)",
-      "Bash(\"/Users/mac/Documents/devotional_app-master 3/lib/main.dart\")"
+      "Bash(\"/Users/mac/Documents/devotional_app-master 3/lib/main.dart\")",
+      "Bash(flutter pub:*)",
+      "Bash(nc:*)"
     ],
     "deny": [],
     "ask": []
