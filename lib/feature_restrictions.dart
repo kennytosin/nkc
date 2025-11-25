@@ -62,36 +62,7 @@ class FeatureRestrictions {
     );
   }
 
-  /// 5. CHECK IF SCREENSHOTS ARE ALLOWED
-  /// Returns true if user can take screenshots
-  static Future<bool> canTakeScreenshots() async {
-    return await SubscriptionManager.hasPremiumAccess();
-  }
-
-  /// 6. SETUP SCREENSHOT PROTECTION
-  /// Call this in initState of screens you want to protect
-  static Future<void> setupScreenshotProtection(BuildContext context) async {
-    final isPremium = await SubscriptionManager.hasPremiumAccess();
-
-    if (!isPremium) {
-      // Show warning that screenshots require premium
-      // Note: Actually blocking screenshots is platform-specific and complex
-      // For now, we'll just track attempts
-      print('⚠️ Screenshot protection active for free user');
-    }
-  }
-
-  /// 7. SHOW SCREENSHOT WARNING
-  /// Call this when screenshot attempt is detected
-  static Future<void> showScreenshotWarning(BuildContext context) async {
-    await PremiumFeatureGate.checkAccess(
-      context: context,
-      featureName: 'Screenshot Permission',
-      featureDescription: 'Save and share devotionals as images with premium access.',
-    );
-  }
-
-  /// 8. CHECK IF PRIORITY SUPPORT IS ACCESSIBLE
+  /// 5. CHECK IF PRIORITY SUPPORT IS ACCESSIBLE
   static Future<bool> canAccessPrioritySupport(BuildContext context) async {
     return await PremiumFeatureGate.checkAccess(
       context: context,

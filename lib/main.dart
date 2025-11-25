@@ -4624,6 +4624,297 @@ class MorePage extends StatelessWidget {
     }
   }
 
+  Future _handleDeleteAccount(BuildContext context) async {
+    // Step 1: Show warning dialog
+    final proceed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        backgroundColor: const Color(0xFF1E1E1E),
+        title: Row(
+          children: [
+            Icon(Icons.warning, color: Colors.red[400]),
+            const SizedBox(width: 8),
+            const Text('Delete Account', style: TextStyle(color: Colors.white)),
+          ],
+        ),
+        content: const Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              'Are you sure you want to delete your account?',
+              style: TextStyle(
+                color: Colors.white,
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+            SizedBox(height: 16),
+            Text(
+              'This action is PERMANENT and you will lose:',
+              style: TextStyle(color: Colors.red),
+            ),
+            SizedBox(height: 8),
+            Text('• All payment history', style: TextStyle(color: Colors.white70)),
+            Text('• Active subscriptions', style: TextStyle(color: Colors.white70)),
+            Text('• Saved favorites', style: TextStyle(color: Colors.white70)),
+            Text('• Offline downloads', style: TextStyle(color: Colors.white70)),
+            Text('• All account data', style: TextStyle(color: Colors.white70)),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Cancel', style: TextStyle(color: Colors.grey)),
+          ),
+          ElevatedButton(
+            onPressed: () => Navigator.pop(context, true),
+            style: ElevatedButton.styleFrom(backgroundColor: Colors.red),
+            child: const Text('Continue', style: TextStyle(color: Colors.white)),
+          ),
+        ],
+      ),
+    );
+
+    if (proceed != true || !context.mounted) return;
+
+    // Step 2: Request password/PIN confirmation
+    final pinController = TextEditingController();
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        backgroundColor: const Color(0xFF1E1E1E),
+        title: const Text('Confirm Your PIN', style: TextStyle(color: Colors.white)),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Text(
+              'Enter your PIN to confirm account deletion',
+              style: TextStyle(color: Colors.white70),
+            ),
+            const SizedBox(height: 16),
+            TextField(
+              controller: pinController,
+              obscureText: true,
+              keyboardType: TextInputType.number,
+              maxLength: 6,
+              style: const TextStyle(color: Colors.white),
+              decoration: const InputDecoration(
+                hintText: 'Enter PIN',
+                hintStyle: TextStyle(color: Colors.white38),
+                counterText: '',
+                enabledBorder: OutlineInputBorder(
+                  borderSide: BorderSide(color: Colors.grey),
+                ),
+                focusedBorder: OutlineInputBorder(
+                  borderSide: BorderSide(color: Colors.amber),
+                ),
+              ),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Cancel', style: TextStyle(color: Colors.grey)),
+          ),
+          ElevatedButton(
+            onPressed: () => Navigator.pop(context, true),
+            style: ElevatedButton.styleFrom(backgroundColor: Colors.red),
+            child: const Text('Delete Account', style: TextStyle(color: Colors.white)),
+          ),
+        ],
+      ),
+    );
+
+    if (confirmed != true || !context.mounted) return;
+
+    // Step 3: Verify PIN and delete account
+    final pin = pinController.text.trim();
+    if (pin.isEmpty) {
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('PIN is required')),
+        );
+      }
+      return;
+    }
+
+    // Show loading dialog
+    if (context.mounted) {
+      showDialog(
+        context: context,
+        barrierDismissible: false,
+        builder: (context) => const Center(
+          child: CircularProgressIndicator(color: Colors.amber),
+        ),
+      );
+    }
+
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final userName = prefs.getString('user_name');
+      final userId = prefs.getString('user_id');
+
+      if (userName == null || userId == null) {
+        throw Exception('User data not found');
+      }
+
+      // Verify PIN
+      final user = await loginUser(name: userName, pin: pin);
+      if (user == null) {
+        if (context.mounted) {
+          Navigator.pop(context); // Close loading dialog
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('Incorrect PIN. Account deletion cancelled.'),
+              backgroundColor: Colors.red,
+            ),
+          );
+        }
+        return;
+      }
+
+      // Delete from Supabase tables - with detailed error handling
+      print('🗑️  Deleting account data from Supabase...');
+      print('   User ID: $userId');
+
+      try {
+        print('   Deleting favorites...');
+        await Supabase.instance.client
+            .from('user_favorites')
+            .delete()
+            .eq('user_id', userId);
+        print('   ✅ Favorites deleted');
+      } catch (e) {
+        print('   ⚠️  Favorites delete error: $e');
+        // Continue anyway - table might not exist
+      }
+
+      try {
+        print('   Deleting payments...');
+        final paymentsResponse = await Supabase.instance.client
+            .from('payments')
+            .delete()
+            .eq('user_id', userId);
+        print('   ✅ Payments deleted');
+      } catch (e) {
+        print('   ⚠️  Payments delete error: $e');
+        // Continue anyway
+      }
+
+      try {
+        print('   Deleting subscriptions...');
+        final subsResponse = await Supabase.instance.client
+            .from('subscriptions')
+            .delete()
+            .eq('user_id', userId);
+        print('   ✅ Subscriptions deleted');
+      } catch (e) {
+        print('   ⚠️  Subscriptions delete error: $e');
+        // Continue anyway
+      }
+
+      print('   Deleting user account...');
+      await Supabase.instance.client
+          .from('users')
+          .delete()
+          .eq('id', userId);
+      print('   ✅ User account deleted from Supabase');
+
+      // Clear all local data
+      print('🧹 Clearing local data...');
+      await prefs.clear();
+      print('   ✅ SharedPreferences cleared');
+
+      // Clear local databases
+      try {
+        print('   Clearing local favorites...');
+        await UnifiedFavoritesDatabase.instance.database.then((db) => db.delete('unified_favorites'));
+        print('   ✅ Favorites cleared');
+
+        print('   Clearing local payments...');
+        await PaymentDatabase.instance.database.then((db) => db.delete('payments'));
+        print('   ✅ Payments cleared');
+
+        print('   Clearing local downloads...');
+        await DownloadsDatabase.instance.database.then((db) => db.delete('downloads'));
+        print('   ✅ Downloads cleared');
+      } catch (e) {
+        print('   ⚠️  Local database cleanup error: $e');
+      }
+
+      print('');
+      print('✅ ACCOUNT DELETION COMPLETE');
+      print('   Closing app - user must restart...');
+      print('');
+
+      // Close the loading dialog
+      if (context.mounted) {
+        try {
+          Navigator.of(context, rootNavigator: true).pop();
+          print('✅ Loading dialog closed');
+        } catch (e) {
+          print('⚠️  Could not close loading dialog: $e');
+        }
+      }
+
+      // Brief delay
+      await Future.delayed(const Duration(milliseconds: 500));
+
+      // Show final message and exit app
+      if (context.mounted) {
+        await showDialog(
+          context: context,
+          barrierDismissible: false,
+          builder: (context) => AlertDialog(
+            backgroundColor: const Color(0xFF1E1E1E),
+            title: const Row(
+              children: [
+                Icon(Icons.check_circle, color: Colors.green),
+                SizedBox(width: 8),
+                Text('Account Deleted', style: TextStyle(color: Colors.white)),
+              ],
+            ),
+            content: const Text(
+              'Your account has been permanently deleted.\n\nPlease close and restart the app to continue.',
+              style: TextStyle(color: Colors.white70),
+            ),
+            actions: [
+              ElevatedButton(
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: Colors.amber,
+                  foregroundColor: Colors.black,
+                ),
+                onPressed: () {
+                  // Force close the app
+                  SystemChannels.platform.invokeMethod('SystemNavigator.pop');
+                },
+                child: const Text('Close App'),
+              ),
+            ],
+          ),
+        );
+      }
+    } catch (e, stackTrace) {
+      print('');
+      print('❌ ACCOUNT DELETION FAILED');
+      print('   Error: $e');
+      print('   Stack trace: $stackTrace');
+      print('');
+
+      if (context.mounted) {
+        Navigator.pop(context); // Close loading dialog
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Error deleting account: $e'),
+            backgroundColor: Colors.red,
+            duration: const Duration(seconds: 5),
+          ),
+        );
+      }
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final items = [
@@ -4637,6 +4928,7 @@ class MorePage extends StatelessWidget {
         "icon": Icons.notifications,
         "page": const NotificationSettingsPage(),
       },
+      {"title": "Delete Account", "icon": Icons.delete_forever, "page": null},
       {"title": "Logout", "icon": Icons.logout, "page": null},
     ];
 
@@ -4647,13 +4939,25 @@ class MorePage extends StatelessWidget {
         separatorBuilder: (_, __) => const Divider(),
         itemBuilder: (context, index) {
           final item = items[index];
+          final isDeleteAccount = item["title"] == "Delete Account";
+
           return ListTile(
-            leading: Icon(item["icon"] as IconData, color: Colors.amber),
-            title: Text(item["title"] as String),
+            leading: Icon(
+              item["icon"] as IconData,
+              color: isDeleteAccount ? Colors.red : Colors.amber,
+            ),
+            title: Text(
+              item["title"] as String,
+              style: TextStyle(
+                color: isDeleteAccount ? Colors.red : Colors.white,
+              ),
+            ),
             trailing: const Icon(Icons.arrow_forward_ios, size: 16),
             onTap: () {
               if (item["title"] == "Logout") {
                 _handleLogout(context);
+              } else if (item["title"] == "Delete Account") {
+                _handleDeleteAccount(context);
               } else {
                 Navigator.push(
                   context,
@@ -7043,46 +7347,13 @@ class DevotionalDetailPage extends StatefulWidget {
   State<DevotionalDetailPage> createState() => _DevotionalDetailPageState();
 }
 
-class _DevotionalDetailPageState extends State<DevotionalDetailPage> with WidgetsBindingObserver {
+class _DevotionalDetailPageState extends State<DevotionalDetailPage> {
   bool _isDownloaded = false;
 
   @override
   void initState() {
     super.initState();
-    WidgetsBinding.instance.addObserver(this);
     _checkIfDownloaded();
-    _setupScreenshotProtection();
-  }
-
-  @override
-  void dispose() {
-    WidgetsBinding.instance.removeObserver(this);
-    super.dispose();
-  }
-
-  Future<void> _setupScreenshotProtection() async {
-    await FeatureRestrictions.setupScreenshotProtection(context);
-  }
-
-  @override
-  void didChangeAppLifecycleState(AppLifecycleState state) {
-    // Detect screenshot attempts
-    if (state == AppLifecycleState.inactive) {
-      _onPossibleScreenshot();
-    }
-  }
-
-  Future<void> _onPossibleScreenshot() async {
-    final canScreenshot = await FeatureRestrictions.canTakeScreenshots();
-
-    if (!canScreenshot && mounted) {
-      // Show warning after short delay
-      Future.delayed(const Duration(milliseconds: 500), () {
-        if (mounted) {
-          FeatureRestrictions.showScreenshotWarning(context);
-        }
-      });
-    }
   }
 
   Future<void> _checkIfDownloaded() async {
@@ -7284,8 +7555,11 @@ class _ArchivePageState extends State<ArchivePage> {
     }
   }
 
-  void _applyFiltersAndSort() {
+  void _applyFiltersAndSort() async {
     List<Devotional> filtered = List.from(archiveDevotionals);
+
+    // Note: All devotionals are now shown to free users
+    // Access control happens when they try to open a weekday devotional
 
     // Apply search filter
     if (searchQuery.isNotEmpty) {
@@ -7650,7 +7924,19 @@ class _ArchivePageState extends State<ArchivePage> {
 
   Widget _buildDevotionalCard(Devotional devotional) {
     return GestureDetector(
-      onTap: () {
+      onTap: () async {
+        // Check if user can access this devotional
+        final canAccess = await FeatureRestrictions.canAccessDevotional(
+          devotional.date,
+        );
+
+        if (!canAccess) {
+          // Show upgrade dialog for weekday devotionals
+          await FeatureRestrictions.showWeekdayDevotionalLock(context);
+          return;
+        }
+
+        // User has access - navigate to devotional
         Navigator.push(
           context,
           MaterialPageRoute(
@@ -7815,6 +8101,10 @@ class _DownloadsPageState extends State<DownloadsPage> {
 
   Future<void> _loadDownloads() async {
     final downloaded = await DownloadsDatabase.instance.getAllDevotionals();
+
+    // Note: All downloaded devotionals are now shown to free users
+    // Access control happens when they try to open a weekday devotional
+
     setState(() {
       _downloads = downloaded;
     });
@@ -7852,7 +8142,19 @@ class _DownloadsPageState extends State<DownloadsPage> {
                     Icons.chevron_right,
                     color: Colors.white54,
                   ),
-                  onTap: () {
+                  onTap: () async {
+                    // Check if user can access this devotional
+                    final canAccess = await FeatureRestrictions.canAccessDevotional(
+                      devotional.date,
+                    );
+
+                    if (!canAccess) {
+                      // Show upgrade dialog for weekday devotionals
+                      await FeatureRestrictions.showWeekdayDevotionalLock(context);
+                      return;
+                    }
+
+                    // User has access - navigate to devotional
                     Navigator.of(context).push(
                       MaterialPageRoute(
                         builder: (_) => EnhancedDevotionalDetailPage(
@@ -9329,10 +9631,13 @@ class _BibleTranslationsDownloadPageState
 
   // ✅ UPDATED: Prevent back navigation during download
   Future<void> _downloadTranslation(BibleTranslation translation) async {
-    // Check if user has permission to download
-    final canDownload = await FeatureRestrictions.canDownloadOffline(context);
-    if (!canDownload) {
-      return; // Upgrade dialog already shown
+    // ASV is always free to download - only check permission for other translations
+    final isASV = translation.id.toUpperCase() == 'ASV';
+    if (!isASV) {
+      final canDownload = await FeatureRestrictions.canDownloadOffline(context);
+      if (!canDownload) {
+        return; // Upgrade dialog already shown
+      }
     }
 
     setState(() {

@@ -63,6 +63,7 @@ class PaystackService {
     return 'DEV_${DateTime.now().millisecondsSinceEpoch}_${DateTime.now().microsecond}';
   }
 
+
   Future<String> _getUserEmail() async {
     try {
       final prefs = await SharedPreferences.getInstance();
@@ -137,7 +138,9 @@ class PaystackService {
     required double amount,
   }) {
     int pollCount = 0;
-    const maxPolls = 60; // Poll for up to 3 minutes (60 * 3 seconds)
+    const maxPolls = 40; // Poll for up to 2 minutes (40 * 3 seconds)
+    int notFoundCount = 0;
+    const maxNotFoundAttempts = 20; // Stop after 20 consecutive "not found" errors
 
     Timer.periodic(const Duration(seconds: 3), (timer) async {
       pollCount++;
@@ -145,10 +148,16 @@ class PaystackService {
       // Stop if payment already completed or max attempts reached
       if (isCompletedCheck() || pollCount > maxPolls) {
         timer.cancel();
+        if (pollCount > maxPolls) {
+          print('⏱️  Polling timeout reached. Relying on callback.');
+        }
         return;
       }
 
-      print('🔄 Polling payment status... (attempt $pollCount)');
+      // Only show polling status every 5 attempts to reduce log spam
+      if (pollCount % 5 == 0) {
+        print('🔄 Polling payment status... (attempt $pollCount/$maxPolls)');
+      }
 
       try {
         final isVerified = await _verifyPayment(reference);
@@ -156,6 +165,7 @@ class PaystackService {
         if (isVerified) {
           timer.cancel();
           print('✅ Payment detected as successful! Auto-closing...');
+          notFoundCount = 0; // Reset counter on success
 
           if (!isCompletedCheck()) {
             // Close the payment webview
@@ -168,17 +178,48 @@ class PaystackService {
             }
 
             // Complete with success
-            completer.complete(PaymentResponse(
-              status: PaymentStatus.successful,
-              transactionId: reference,
-              txRef: reference,
-              amount: amount,
-              message: 'Payment successful (auto-detected)',
-            ));
+            try {
+              completer.complete(PaymentResponse(
+                status: PaymentStatus.successful,
+                transactionId: reference,
+                txRef: reference,
+                amount: amount,
+                message: 'Payment successful (auto-detected)',
+              ));
+            } catch (e) {
+              // Completer already completed by another thread - this is fine
+              print('Note: Payment already processed');
+            }
           }
+        } else {
+          // Payment not verified yet, continue polling
+          notFoundCount = 0; // Reset if we got a response but not verified
         }
       } catch (e) {
-        print('⚠️  Polling error: $e');
+        final errorMsg = e.toString();
+
+        // Check if this is a "transaction not found" error
+        if (errorMsg.contains('Transaction reference not found') ||
+            errorMsg.contains('transaction_not_found')) {
+          notFoundCount++;
+
+          // Only log every 10th "not found" to reduce spam
+          if (notFoundCount % 10 == 0) {
+            print('ℹ️  Transaction not yet created (attempt $pollCount). This is normal in test mode.');
+          }
+
+          // If we've tried many times and transaction doesn't exist, stop polling
+          // The onSuccess/onClosed callbacks will handle completion
+          if (notFoundCount >= maxNotFoundAttempts) {
+            timer.cancel();
+            print('ℹ️  Transaction not found after $notFoundCount checks.');
+            print('   Relying on Paystack callbacks instead of polling.');
+            return;
+          }
+        } else if (!errorMsg.contains('Future already completed')) {
+          // Log other errors (but not "already completed")
+          print('⚠️  Polling error: $e');
+        }
       }
     });
   }
@@ -196,13 +237,14 @@ class PaystackService {
       final email = userEmail ?? await _getUserEmail();
       final txRef = _generateTransactionRef();
 
-      // Convert amount to kobo (Paystack uses smallest currency unit)
-      final amountInKobo = (amount * 100).toInt();
+      // Convert amount to smallest currency unit (kobo for NGN)
+      final amountInSmallestUnit = (amount * 100).toInt();
 
       print('═══════════════════════════════════════════════════════');
       print('🔵 INITIATING PAYSTACK PAYMENT');
       print('═══════════════════════════════════════════════════════');
-      print('📌 Amount: ₦${amount.toStringAsFixed(2)} ($amountInKobo kobo)');
+      print('📌 Amount: ₦${amount.toStringAsFixed(0)} ($amountInSmallestUnit kobo)');
+      print('📌 Currency: NGN');
       print('📌 Plan: $planName');
       print('📌 Customer: $email');
       print('📌 Reference: $txRef');
@@ -213,7 +255,7 @@ class PaystackService {
       print('');
       print('ℹ️  In TEST mode:');
       print('   1. Select "Success" option');
-      print('   2. Click "Pay NGN $amountInKobo" button');
+      print('   2. Click "Pay NGN $amountInSmallestUnit" button');
       print('   3. Wait for automatic detection (or tap back manually)');
       print('');
 
@@ -309,12 +351,13 @@ class PaystackService {
         secretKey: PaystackKeys.secretKey,
         context: context,
         customerEmail: email,
-        amount: amountInKobo.toString(),
+        amount: amountInSmallestUnit.toString(),
         reference: txRef,
-        currency: PaystackKeys.currency,
+        currency: 'NGN', // Nigerian Naira only
         metadata: {
           'plan_id': planId,
           'plan_name': planName,
+          'currency': 'NGN',
         },
         onSuccess: () async {
           print('═══════════════════════════════════════════════════════');

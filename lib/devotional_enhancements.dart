@@ -9,6 +9,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'main.dart';
 import 'feature_restrictions.dart';
 import 'premium_feature_gate.dart';
+import 'payment_plans_enhancement.dart';
 
 // Note: This file works independently of main.dart
 // It uses dynamic typing to avoid circular dependencies
@@ -31,13 +32,19 @@ class UnifiedFavoritesDatabase {
     final dbPath = await getDatabasesPath();
     final path = p.join(dbPath, filePath);
 
-    return await openDatabase(path, version: 1, onCreate: _createDB);
+    return await openDatabase(
+      path,
+      version: 2, // Incremented from 1 to 2 for user_id migration
+      onCreate: _createDB,
+      onUpgrade: _onUpgrade,
+    );
   }
 
   Future _createDB(Database db, int version) async {
     await db.execute('''
       CREATE TABLE unified_favorites (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id TEXT NOT NULL,
         type TEXT NOT NULL,
         reference_id TEXT NOT NULL,
         title TEXT NOT NULL,
@@ -48,14 +55,55 @@ class UnifiedFavoritesDatabase {
         verse INTEGER,
         translation_id TEXT,
         created_at TEXT NOT NULL,
-        UNIQUE(type, reference_id)
+        UNIQUE(user_id, type, reference_id)
       )
     ''');
 
-    // Create index for faster queries
+    // Create indexes for faster queries
+    await db.execute('''
+      CREATE INDEX idx_user_id ON unified_favorites(user_id)
+    ''');
     await db.execute('''
       CREATE INDEX idx_type_reference ON unified_favorites(type, reference_id)
     ''');
+  }
+
+  // Handle database migration from version 1 to 2
+  Future _onUpgrade(Database db, int oldVersion, int newVersion) async {
+    if (oldVersion < 2) {
+      print('📊 Migrating favorites database to version 2...');
+
+      // Add user_id column
+      await db.execute('ALTER TABLE unified_favorites ADD COLUMN user_id TEXT');
+
+      // Get current user_id from SharedPreferences
+      try {
+        final prefs = await SharedPreferences.getInstance();
+        final currentUserId = prefs.getString('user_id') ?? 'unknown';
+
+        // Update all existing favorites with current user_id
+        await db.execute(
+          'UPDATE unified_favorites SET user_id = ? WHERE user_id IS NULL',
+          [currentUserId],
+        );
+
+        print('✅ Migrated existing favorites to user: $currentUserId');
+      } catch (e) {
+        print('⚠️  Migration warning: $e');
+        // If we can't get user_id, assign to 'migrated_user'
+        await db.execute(
+          'UPDATE unified_favorites SET user_id = ? WHERE user_id IS NULL',
+          ['migrated_user'],
+        );
+      }
+
+      // Create index for user_id
+      await db.execute('''
+        CREATE INDEX IF NOT EXISTS idx_user_id ON unified_favorites(user_id)
+      ''');
+
+      print('✅ Database migration completed');
+    }
   }
 
   // Add a favorite
@@ -72,7 +120,17 @@ class UnifiedFavoritesDatabase {
   }) async {
     final db = await instance.database;
 
+    // Get current user_id
+    final prefs = await SharedPreferences.getInstance();
+    final userId = prefs.getString('user_id');
+
+    if (userId == null) {
+      print('⚠️ Cannot add favorite: No user logged in');
+      return;
+    }
+
     await db.insert('unified_favorites', {
+      'user_id': userId,
       'type': type,
       'reference_id': referenceId,
       'title': title,
@@ -87,11 +145,7 @@ class UnifiedFavoritesDatabase {
 
     // Sync to cloud after adding
     try {
-      final prefs = await SharedPreferences.getInstance();
-      final userId = prefs.getString('user_id');
-      if (userId != null) {
-        await CloudSyncManager.instance.syncFavoritesToCloud(userId);
-      }
+      await CloudSyncManager.instance.syncFavoritesToCloud(userId);
     } catch (e) {
       print('⚠️ Could not sync favorite to cloud: $e');
     }
@@ -104,56 +158,87 @@ class UnifiedFavoritesDatabase {
   }) async {
     final db = await instance.database;
 
+    // Get current user_id
+    final prefs = await SharedPreferences.getInstance();
+    final userId = prefs.getString('user_id');
+
+    if (userId == null) {
+      print('⚠️ Cannot remove favorite: No user logged in');
+      return;
+    }
+
     await db.delete(
       'unified_favorites',
-      where: 'type = ? AND reference_id = ?',
-      whereArgs: [type, referenceId],
+      where: 'user_id = ? AND type = ? AND reference_id = ?',
+      whereArgs: [userId, type, referenceId],
     );
 
     // Remove from cloud after deleting locally
     try {
-      final prefs = await SharedPreferences.getInstance();
-      final userId = prefs.getString('user_id');
-      if (userId != null) {
-        await CloudSyncManager.instance.removeFavoriteFromCloud(
-          userId: userId,
-          type: type,
-          referenceId: referenceId,
-        );
-      }
+      await CloudSyncManager.instance.removeFavoriteFromCloud(
+        userId: userId,
+        type: type,
+        referenceId: referenceId,
+      );
     } catch (e) {
       print('⚠️ Could not remove favorite from cloud: $e');
     }
   }
 
-  // Check if a favorite exists
+  // Check if a favorite exists (for current user)
   Future<bool> isFavorite({
     required String type,
     required String referenceId,
   }) async {
     final db = await instance.database;
+
+    // Get current user_id
+    final prefs = await SharedPreferences.getInstance();
+    final userId = prefs.getString('user_id');
+
+    if (userId == null) return false;
+
     final result = await db.query(
       'unified_favorites',
-      where: 'type = ? AND reference_id = ?',
-      whereArgs: [type, referenceId],
+      where: 'user_id = ? AND type = ? AND reference_id = ?',
+      whereArgs: [userId, type, referenceId],
       limit: 1,
     );
     return result.isNotEmpty;
   }
 
-  // Get all favorites
+  // Get all favorites (for current user)
   Future<List<Map<String, dynamic>>> getAllFavorites() async {
     final db = await instance.database;
-    return await db.query('unified_favorites', orderBy: 'created_at DESC');
-  }
 
-  // Get favorites by type
-  Future<List<Map<String, dynamic>>> getFavoritesByType(String type) async {
-    final db = await instance.database;
+    // Get current user_id
+    final prefs = await SharedPreferences.getInstance();
+    final userId = prefs.getString('user_id');
+
+    if (userId == null) return [];
+
     return await db.query(
       'unified_favorites',
-      where: 'type = ?',
-      whereArgs: [type],
+      where: 'user_id = ?',
+      whereArgs: [userId],
+      orderBy: 'created_at DESC',
+    );
+  }
+
+  // Get favorites by type (for current user)
+  Future<List<Map<String, dynamic>>> getFavoritesByType(String type) async {
+    final db = await instance.database;
+
+    // Get current user_id
+    final prefs = await SharedPreferences.getInstance();
+    final userId = prefs.getString('user_id');
+
+    if (userId == null) return [];
+
+    return await db.query(
+      'unified_favorites',
+      where: 'user_id = ? AND type = ?',
+      whereArgs: [userId, type],
       orderBy: 'created_at DESC',
     );
   }
@@ -596,47 +681,14 @@ class EnhancedDevotionalDetailPage extends StatefulWidget {
 }
 
 class _EnhancedDevotionalDetailPageState
-    extends State<EnhancedDevotionalDetailPage> with WidgetsBindingObserver {
+    extends State<EnhancedDevotionalDetailPage> {
   bool _isFavorite = false;
   bool _isDownloaded = false;
 
   @override
   void initState() {
     super.initState();
-    WidgetsBinding.instance.addObserver(this);
     _checkStatus();
-    _setupScreenshotProtection();
-  }
-
-  @override
-  void dispose() {
-    WidgetsBinding.instance.removeObserver(this);
-    super.dispose();
-  }
-
-  Future<void> _setupScreenshotProtection() async {
-    await FeatureRestrictions.setupScreenshotProtection(context);
-  }
-
-  @override
-  void didChangeAppLifecycleState(AppLifecycleState state) {
-    // Detect screenshot attempts
-    if (state == AppLifecycleState.inactive) {
-      _onPossibleScreenshot();
-    }
-  }
-
-  Future<void> _onPossibleScreenshot() async {
-    final canScreenshot = await FeatureRestrictions.canTakeScreenshots();
-
-    if (!canScreenshot && mounted) {
-      // Show warning after short delay
-      Future.delayed(const Duration(milliseconds: 500), () {
-        if (mounted) {
-          FeatureRestrictions.showScreenshotWarning(context);
-        }
-      });
-    }
   }
 
   Future<void> _checkStatus() async {
@@ -929,8 +981,11 @@ class _UnifiedFavoritesPageState extends State<UnifiedFavoritesPage> {
     }
   }
 
-  void _applyFiltersAndSort() {
+  void _applyFiltersAndSort() async {
     List<Map<String, dynamic>> filtered = List.from(allFavorites);
+
+    // Note: All devotional favorites are now shown to free users
+    // Access control happens when they try to open a weekday devotional
 
     // Apply search filter
     if (searchQuery.isNotEmpty) {
@@ -1354,14 +1409,37 @@ class _UnifiedFavoritesPageState extends State<UnifiedFavoritesPage> {
   }
 
   // Navigate to appropriate detail page based on type
-  void _openFavoriteDetail(Map<String, dynamic> favorite) {
+  void _openFavoriteDetail(Map<String, dynamic> favorite) async {
     final type = favorite['type'] as String;
 
     try {
       switch (type) {
         case 'devotional':
-          // Navigate to devotional detail
-          // We need to reconstruct a Devotional object
+          // Check if user can access this devotional
+          DateTime? devotionalDate;
+          try {
+            final subtitle = favorite['subtitle']?.toString() ?? '';
+            if (subtitle.isNotEmpty) {
+              devotionalDate = DateFormat('MMM dd, yyyy').parse(subtitle);
+            }
+          } catch (e) {
+            print('⚠️ Could not parse devotional date: $e');
+          }
+
+          // If we have a date, check access
+          if (devotionalDate != null) {
+            final canAccess = await FeatureRestrictions.canAccessDevotional(
+              devotionalDate,
+            );
+
+            if (!canAccess) {
+              // Show upgrade dialog for weekday devotionals
+              await FeatureRestrictions.showWeekdayDevotionalLock(context);
+              return;
+            }
+          }
+
+          // User has access - navigate to devotional detail
           Navigator.push(
             context,
             MaterialPageRoute(

@@ -3,7 +3,45 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:intl/intl.dart';
 import 'package:http/http.dart' as http;
 import 'dart:convert';
+import 'dart:io' show Platform;
 import 'paystack_service.dart';
+
+// ------------------------- CURRENCY MODELS -------------------------
+
+enum Currency {
+  NGN, // Nigerian Naira
+  USD, // US Dollar
+  GBP, // British Pound
+  EUR, // Euro
+  GHS, // Ghanaian Cedi
+  KES, // Kenyan Shilling
+  ZAR, // South African Rand
+}
+
+extension CurrencyExtension on Currency {
+  String get symbol {
+    switch (this) {
+      case Currency.NGN:
+        return '₦';
+      case Currency.USD:
+        return '\$';
+      case Currency.GBP:
+        return '£';
+      case Currency.EUR:
+        return '€';
+      case Currency.GHS:
+        return 'GH₵';
+      case Currency.KES:
+        return 'KSh';
+      case Currency.ZAR:
+        return 'R';
+    }
+  }
+
+  String get code {
+    return name;
+  }
+}
 
 // ------------------------- SUBSCRIPTION MODELS -------------------------
 
@@ -12,7 +50,7 @@ enum SubscriptionTier { free, threeMonths, sixMonths, yearly }
 class SubscriptionPlan {
   final SubscriptionTier tier;
   final String name;
-  final double price; // NGN price only
+  final Map<Currency, double> prices; // Multiple currency support
   final int durationMonths;
   final List<String> features;
   final List<String> limitations;
@@ -20,28 +58,30 @@ class SubscriptionPlan {
   const SubscriptionPlan({
     required this.tier,
     required this.name,
-    required this.price,
+    required this.prices,
     required this.durationMonths,
     required this.features,
     required this.limitations,
   });
 
-  // Get formatted price display
-  String get priceDisplay {
-    if (price == 0) return 'Free';
-    return '₦${price.toStringAsFixed(0)}';
-  }
-
-  // Get price per month
-  double get pricePerMonth {
-    return durationMonths == 0 ? 0 : price / durationMonths;
+  // Get price for a specific currency
+  double getPrice(Currency currency) {
+    return prices[currency] ?? prices[Currency.NGN] ?? 0.0;
   }
 
   static const List<SubscriptionPlan> allPlans = [
     SubscriptionPlan(
       tier: SubscriptionTier.free,
       name: 'Free Plan',
-      price: 0.00,
+      prices: {
+        Currency.NGN: 0.00,
+        Currency.USD: 0.00,
+        Currency.GBP: 0.00,
+        Currency.EUR: 0.00,
+        Currency.GHS: 0.00,
+        Currency.KES: 0.00,
+        Currency.ZAR: 0.00,
+      },
       durationMonths: 0,
       features: [
         'Sunday devotionals access',
@@ -59,7 +99,15 @@ class SubscriptionPlan {
     SubscriptionPlan(
       tier: SubscriptionTier.threeMonths,
       name: '3-Month Premium',
-      price: 1000.00,
+      prices: {
+        Currency.NGN: 1000.00,  // ₦1,000
+        Currency.USD: 3.00,     // $3
+        Currency.GBP: 2.50,     // £2.50
+        Currency.EUR: 2.80,     // €2.80
+        Currency.GHS: 40.00,    // GH₵40
+        Currency.KES: 400.00,   // KSh400
+        Currency.ZAR: 50.00,    // R50
+      },
       durationMonths: 3,
       features: [
         '✅ Access to ALL devotionals',
@@ -73,7 +121,15 @@ class SubscriptionPlan {
     SubscriptionPlan(
       tier: SubscriptionTier.sixMonths,
       name: '6-Month Premium',
-      price: 1500.00,
+      prices: {
+        Currency.NGN: 1500.00,  // ₦1,500
+        Currency.USD: 4.50,     // $4.50
+        Currency.GBP: 3.50,     // £3.50
+        Currency.EUR: 4.00,     // €4
+        Currency.GHS: 60.00,    // GH₵60
+        Currency.KES: 600.00,   // KSh600
+        Currency.ZAR: 75.00,    // R75
+      },
       durationMonths: 6,
       features: [
         '✅ Access to ALL devotionals',
@@ -88,7 +144,15 @@ class SubscriptionPlan {
     SubscriptionPlan(
       tier: SubscriptionTier.yearly,
       name: 'Yearly Premium',
-      price: 2500.00,
+      prices: {
+        Currency.NGN: 2500.00,  // ₦2,500
+        Currency.USD: 7.00,     // $7
+        Currency.GBP: 5.50,     // £5.50
+        Currency.EUR: 6.50,     // €6.50
+        Currency.GHS: 95.00,    // GH₵95
+        Currency.KES: 950.00,   // KSh950
+        Currency.ZAR: 120.00,   // R120
+      },
       durationMonths: 12,
       features: [
         '✅ Access to ALL devotionals',
@@ -103,12 +167,128 @@ class SubscriptionPlan {
     ),
   ];
 
+  // Get formatted price display for a specific currency
+  String getPriceDisplay(Currency currency) {
+    final price = getPrice(currency);
+    if (price == 0) return 'Free';
+
+    // Format based on currency
+    switch (currency) {
+      case Currency.NGN:
+      case Currency.GHS:
+      case Currency.KES:
+      case Currency.ZAR:
+        // No decimal places for these currencies
+        return '${currency.symbol}${price.toStringAsFixed(0)}';
+      default:
+        // 2 decimal places for USD, GBP, EUR
+        return '${currency.symbol}${price.toStringAsFixed(2)}';
+    }
+  }
+
   String get durationDisplay {
     if (durationMonths == 0) return 'Forever';
     if (durationMonths == 3) return '3 Months';
     if (durationMonths == 6) return '6 Months';
     if (durationMonths == 12) return '1 Year';
     return '$durationMonths Months';
+  }
+
+  // Get price per month for a specific currency
+  double getPricePerMonth(Currency currency) {
+    final price = getPrice(currency);
+    return durationMonths == 0 ? 0 : price / durationMonths;
+  }
+}
+
+// ------------------------- CURRENCY MANAGER -------------------------
+
+class CurrencyManager {
+  static const String _currencyKey = 'user_preferred_currency';
+
+  // Detect currency based on device locale
+  static Future<Currency> detectCurrency() async {
+    try {
+      // Try to get from saved preference first
+      final saved = await getSavedCurrency();
+      if (saved != null) return saved;
+
+      // Detect from device locale
+      final String locale = Platform.localeName; // e.g., "en_US", "en_NG"
+      final String countryCode = locale.split('_').last.toUpperCase();
+
+      Currency detected;
+      switch (countryCode) {
+        case 'NG': // Nigeria
+          detected = Currency.NGN;
+          break;
+        case 'US': // United States
+          detected = Currency.USD;
+          break;
+        case 'GB': // United Kingdom
+          detected = Currency.GBP;
+          break;
+        case 'GH': // Ghana
+          detected = Currency.GHS;
+          break;
+        case 'KE': // Kenya
+          detected = Currency.KES;
+          break;
+        case 'ZA': // South Africa
+          detected = Currency.ZAR;
+          break;
+        // European countries
+        case 'DE': // Germany
+        case 'FR': // France
+        case 'IT': // Italy
+        case 'ES': // Spain
+        case 'NL': // Netherlands
+          detected = Currency.EUR;
+          break;
+        default:
+          // Default to USD for unrecognized regions
+          detected = Currency.USD;
+      }
+
+      // Save the detected currency
+      await saveCurrency(detected);
+      print('💱 Currency detected: ${detected.code} (${detected.symbol})');
+      return detected;
+    } catch (e) {
+      print('⚠️ Error detecting currency: $e');
+      // Fallback to NGN (your primary market)
+      return Currency.NGN;
+    }
+  }
+
+  // Save user's currency preference
+  static Future<void> saveCurrency(Currency currency) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(_currencyKey, currency.name);
+  }
+
+  // Get saved currency preference
+  static Future<Currency?> getSavedCurrency() async {
+    final prefs = await SharedPreferences.getInstance();
+    final saved = prefs.getString(_currencyKey);
+    if (saved == null) return null;
+
+    try {
+      return Currency.values.firstWhere((c) => c.name == saved);
+    } catch (e) {
+      return null;
+    }
+  }
+
+  // Allow users to manually change currency
+  static Future<void> changeCurrency(Currency currency) async {
+    await saveCurrency(currency);
+    print('💱 Currency changed to: ${currency.code}');
+  }
+
+  // Get current currency (with fallback)
+  static Future<Currency> getCurrentCurrency() async {
+    return await detectCurrency();
   }
 }
 
@@ -444,11 +624,26 @@ class _EnhancedPaymentPlansPageState extends State<EnhancedPaymentPlansPage> {
   SubscriptionTier? currentTier;
   DateTime? expiryDate;
   bool isLoading = true;
+  Currency userCurrency = Currency.NGN; // Default currency
 
   @override
   void initState() {
     super.initState();
     _loadSubscriptionStatus();
+    _detectCurrency();
+  }
+
+  // Detect user's currency
+  Future<void> _detectCurrency() async {
+    try {
+      final currency = await CurrencyManager.getCurrentCurrency();
+      setState(() {
+        userCurrency = currency;
+      });
+    } catch (e) {
+      print('Error detecting currency: $e');
+      // Keep default NGN
+    }
   }
 
   Future<void> _loadSubscriptionStatus() async {
@@ -527,12 +722,12 @@ class _EnhancedPaymentPlansPageState extends State<EnhancedPaymentPlansPage> {
                     ),
                     const SizedBox(height: 8),
                     Text(
-                      '${plan.priceDisplay} for ${plan.durationDisplay}',
+                      '${plan.getPriceDisplay(userCurrency)} for ${plan.durationDisplay}',
                       style: const TextStyle(color: Colors.white70),
                     ),
                     const SizedBox(height: 4),
                     Text(
-                      '₦${plan.pricePerMonth.toStringAsFixed(0)}/month',
+                      '${userCurrency.symbol}${plan.getPricePerMonth(userCurrency).toStringAsFixed(userCurrency == Currency.NGN || userCurrency == Currency.GHS || userCurrency == Currency.KES || userCurrency == Currency.ZAR ? 0 : 2)}/month',
                       style: const TextStyle(color: Colors.green, fontSize: 12),
                     ),
                   ],
@@ -566,7 +761,7 @@ class _EnhancedPaymentPlansPageState extends State<EnhancedPaymentPlansPage> {
                   Navigator.pop(dialogContext, true), // ✅ Use dialogContext
               style: ElevatedButton.styleFrom(backgroundColor: Colors.amber),
               child: Text(
-                'Purchase ${plan.priceDisplay}',
+                'Purchase ${plan.getPriceDisplay(userCurrency)}',
                 style: const TextStyle(color: Colors.black),
               ),
             ),
@@ -583,8 +778,8 @@ class _EnhancedPaymentPlansPageState extends State<EnhancedPaymentPlansPage> {
 
   Future<void> _processPurchase(SubscriptionPlan plan) async {
     try {
-      // Get the price (NGN only)
-      final amount = plan.price;
+      // Get the price in the user's currency
+      final amount = plan.getPrice(userCurrency);
 
       // Initiate Paystack payment directly (Paystack shows its own loading UI)
       final paymentResponse = await PaystackService.instance.initiatePayment(
@@ -592,6 +787,7 @@ class _EnhancedPaymentPlansPageState extends State<EnhancedPaymentPlansPage> {
         amount: amount,
         planName: plan.name,
         planId: plan.tier.toString(),
+        currency: userCurrency.code, // Pass currency code to Paystack
       );
 
       // Check payment response
@@ -1189,7 +1385,7 @@ class _EnhancedPaymentPlansPageState extends State<EnhancedPaymentPlansPage> {
                       crossAxisAlignment: CrossAxisAlignment.end,
                       children: [
                         Text(
-                          plan.priceDisplay,
+                          plan.getPriceDisplay(userCurrency),
                           style: TextStyle(
                             color: isCurrentPlan ? Colors.amber : Colors.white,
                             fontSize: 32,
@@ -1198,7 +1394,7 @@ class _EnhancedPaymentPlansPageState extends State<EnhancedPaymentPlansPage> {
                         ),
                         if (isPremiumPlan)
                           Text(
-                            '₦${plan.pricePerMonth.toStringAsFixed(0)}/mo',
+                            '${userCurrency.symbol}${plan.getPricePerMonth(userCurrency).toStringAsFixed(userCurrency == Currency.NGN || userCurrency == Currency.GHS || userCurrency == Currency.KES || userCurrency == Currency.ZAR ? 0 : 2)}/mo',
                             style: const TextStyle(
                               color: Colors.green,
                               fontSize: 12,
